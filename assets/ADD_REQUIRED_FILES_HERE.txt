@@ -1,0 +1,6 @@
+Copy the following original MARS-IP files into this assets folder before pushing to GitHub:
+
+MARS-IP_Unified_Billing_System_FINAL 1.xlsx
+MARSIP reference invoice FR.docx
+MARSIP reference invoice DE.docx
+MARSIP reference invoice EN.docx
