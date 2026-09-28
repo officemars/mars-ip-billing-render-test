@@ -14,16 +14,8 @@ ASSETS=BASE/'assets'
 app=Flask(__name__)
 app.secret_key=os.environ.get('SECRET_KEY','dev-only-change-me')
 db_url = os.environ["DATABASE_URL"]
- 
-if db_url.startswith("postgresql://"):
-	db_url = db_url.replace(
-	"postgresql://",
-	"postgresql+psycopg://",
-	1
-)
- 
+if db_url.startswith("postgresql://"):db_url = db_url.replace("postgresql://","postgresql+psycopg://",1)
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
-
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS']=False
 app.config['SESSION_COOKIE_HTTPONLY']=True
 app.config['SESSION_COOKIE_SAMESITE']='Lax'
