@@ -6,6 +6,8 @@ Upload beside app.py and change2.py, then set Render Start Command to:
 from flask import render_template_string, request, redirect, url_for, flash, jsonify, session
 import change2 as previous
 import app as core
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timezone
 
 app = previous.app
 db = previous.db
@@ -61,7 +63,7 @@ SELECTOR = r'''{% extends "base.html" %}{% block content %}
 <label>Contact<select id="contact" name="contact_id"><option value="">None / free entry</option></select></label>
 <label>Language<select name="language"><option>English</option><option>French</option><option>German</option></select></label></div>
 <div id="workers" class="flash" style="display:none"></div>
-<h2>Available completed, unbilled timekeeper entries</h2><p>Select exactly which entries belong in the invoice. The service, timekeeper, hours, rate, amount and VAT remain editable in the next screen.</p>
+<h2>Available time entries for billing</h2><p>Select the entries to include in this draft fee note. Employee, service description, billable time, rate, amount and VAT treatment remain editable before issue.</p>
 <div id="timers"><p>Select a client.</p></div><button>Create prefilled editable draft</button></form></section>
 <script>
 let allTimers=[];
@@ -89,11 +91,11 @@ EDITOR = r'''{% extends "base.html" %}{% block content %}
 <label>Currency<input name="currency" value="{{draft.currency or 'EUR'}}"></label><label>Default VAT treatment<select name="vat_treatment">{% for x in ['Standard VAT','Reverse charge','Other exemption','Free data entry'] %}<option {% if draft.vat_treatment==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label><label>Default VAT rate %<input type="number" step="0.01" name="vat_rate" value="{{draft.vat_rate or 0}}"></label>
 <label>VAT label<input name="vat_label" value="{{draft.vat_label or 'VAT'}}"></label><label>Custom VAT wording<textarea name="vat_wording">{{draft.vat_wording or ''}}</textarea></label><label>Telecom description<textarea name="telecom_description">{{draft.telecom_description or ''}}</textarea></label><label>Telecom amount<input type="number" step="0.01" name="telecom_amount" value="{{draft.telecom_amount or 0}}"></label>
 <label>Annex title<input name="annex_title" value="{{draft.annex_title or ''}}"></label><label>Annex text<textarea name="annex_text">{{draft.annex_text or ''}}</textarea></label></div>
-<div class="grid"><label class="check"><input type="checkbox" name="show_vat_number" {% if draft.show_vat_number %}checked{% endif %}> Show VAT number</label><label class="check"><input type="checkbox" name="show_engagement" {% if draft.show_engagement %}checked{% endif %}> Show engagement sentence</label><label class="check"><input type="checkbox" name="show_time_schedule" {% if draft.show_time_schedule %}checked{% endif %}> Show page-2 schedule</label><label class="check"><input type="checkbox" name="show_telecom" {% if draft.show_telecom %}checked{% endif %}> Show telecom line</label></div><button>Save header and recalculate</button></form></section>
-<section class="card wide"><h2>Editable bill lines and page-2 schedule</h2><p>Tick <b>Include</b> to bill a line. Tick <b>Page 2</b> to show the line in the detailed schedule. Time-based entries are preselected for Page 2. Each line may have its own VAT treatment and rate.</p>
-<table><tr><th>Order</th><th>Include</th><th>Type</th><th>Service</th><th>Date</th><th>Employee</th><th>Hours/qty</th><th>Rate</th><th>Manual amount</th><th>Net</th><th>VAT treatment</th><th>VAT %</th><th>Page 2</th><th></th></tr>
+<div class="grid"><label class="check"><input type="checkbox" name="show_vat_number" {% if draft.show_vat_number %}checked{% endif %}> Show VAT number</label><label class="check"><input type="checkbox" name="show_engagement" {% if draft.show_engagement %}checked{% endif %}> Show engagement sentence</label><label class="check"><input type="checkbox" name="show_time_schedule" {% if draft.show_time_schedule %}checked{% endif %}> Show detailed services schedule</label><label class="check"><input type="checkbox" name="show_telecom" {% if draft.show_telecom %}checked{% endif %}> Show telecom line</label></div><button>Save header and recalculate</button></form></section>
+<section class="card wide"><h2>Professional services and invoice components</h2><p>Review the proposed time entries and additional fee components below. Each item can be edited, included in the fee note, assigned its own VAT treatment, and shown in the detailed services schedule where appropriate.</p>
+<table><tr><th>Order</th><th>Include</th><th>Type</th><th>Service</th><th>Date</th><th>Employee</th><th>Hours/qty</th><th>Rate</th><th>Manual amount</th><th>Net</th><th>VAT treatment</th><th>VAT %</th><th>Detailed schedule</th><th></th></tr>
 {% for line in lines %}<tr><form method="post" action="{{url_for('update_fee_line',line_id=line.id)}}"><td><input type="number" name="sort_order" value="{{line.sort_order}}"></td><td><input type="checkbox" name="included" {% if line.included %}checked{% endif %}></td><td><select name="line_type">{% for x in line_types %}<option {% if line.line_type==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></td><td><textarea name="description">{{line.description}}</textarea></td><td><input name="service_date" value="{{line.service_date or ''}}"></td><td><input name="timekeeper" value="{{line.timekeeper or ''}}"></td><td><input type="number" step="0.0001" name="quantity" value="{{line.quantity or 0}}"></td><td><input type="number" step="0.01" name="rate" value="{{line.rate or 0}}"></td><td><input type="checkbox" name="amount_override" {% if line.amount_override %}checked{% endif %}></td><td><input type="number" step="0.01" name="amount" value="{{line.amount or 0}}"></td><td><select name="vat_treatment">{% for x in ['Standard VAT','Reverse charge','Other exemption','Free data entry'] %}<option {% if (line.vat_treatment or draft.vat_treatment)==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></td><td><input type="number" step="0.01" name="vat_rate" value="{{line.vat_rate if line.vat_rate is not none else draft.vat_rate}}"></td><td><input type="checkbox" name="include_in_detail" {% if line.include_in_detail %}checked{% endif %}></td><td><button>Save</button></form><form method="post" action="{{url_for('delete_fee_line',line_id=line.id)}}"><button class="danger">Remove</button></form></td></tr>{% endfor %}</table>
-<h3>Add custom line</h3><form method="post" action="{{url_for('add_fee_line',draft_id=draft.id)}}"><div class="grid"><label>Type<select name="line_type">{% for x in line_types %}<option>{{x}}</option>{% endfor %}</select></label><label>Service<textarea name="description" required></textarea></label><label>Date<input name="service_date"></label><label>Employee<input name="timekeeper"></label><label>Hours/quantity<input type="number" step="0.0001" name="quantity" value="1"></label><label>Rate<input type="number" step="0.01" name="rate" value="0"></label><label>Net amount<input type="number" step="0.01" name="amount" value="0"></label><label>VAT treatment<select name="vat_treatment"><option>Standard VAT</option><option>Reverse charge</option><option>Other exemption</option><option>Free data entry</option></select></label><label>VAT %<input type="number" step="0.01" name="vat_rate" value="{{draft.vat_rate or 0}}"></label><label class="check"><input type="checkbox" name="amount_override"> Keep manual amount</label><label class="check"><input type="checkbox" name="include_in_detail"> Show on page 2</label></div><button>Add line</button></form></section>
+<h3>Add custom line</h3><form method="post" action="{{url_for('add_fee_line',draft_id=draft.id)}}"><div class="grid"><label>Type<select name="line_type">{% for x in line_types %}<option>{{x}}</option>{% endfor %}</select></label><label>Service<textarea name="description" required></textarea></label><label>Date<input name="service_date"></label><label>Employee<input name="timekeeper"></label><label>Hours/quantity<input type="number" step="0.0001" name="quantity" value="1"></label><label>Rate<input type="number" step="0.01" name="rate" value="0"></label><label>Net amount<input type="number" step="0.01" name="amount" value="0"></label><label>VAT treatment<select name="vat_treatment"><option>Standard VAT</option><option>Reverse charge</option><option>Other exemption</option><option>Free data entry</option></select></label><label>VAT %<input type="number" step="0.01" name="vat_rate" value="{{draft.vat_rate or 0}}"></label><label class="check"><input type="checkbox" name="amount_override"> Keep manual amount</label><label class="check"><input type="checkbox" name="include_in_detail"> Show in detailed schedule</label></div><button>Add line</button></form></section>
 <section class="card"><p>Net: <b>{{draft.net_total}} {{draft.currency}}</b></p><p>VAT across included components: <b>{{draft.vat_amount}} {{draft.currency}}</b></p><h2>Total gross: {{draft.gross_total}} {{draft.currency}}</h2>{% if draft.status=='Draft' %}<form method="post" action="{{url_for('issue_fee_note',draft_id=draft.id)}}"><button>Issue and download Word fee note</button></form>{% else %}<p>Issued as {{draft.invoice_number}}</p>{% endif %}</section>
 {% endblock %}'''
 
@@ -102,7 +104,12 @@ EDITOR = r'''{% extends "base.html" %}{% block content %}
 @login_required
 @admin_required
 def invoice_context_v3(client_id):
-    timers = Timer.query.filter_by(client_id=client_id, status="Stopped", billable=True, invoiced_status="Unbilled").order_by(Timer.start_time, Timer.id).all()
+    timers = Timer.query.filter(
+        Timer.client_id == client_id,
+        Timer.status == "Stopped",
+        db.or_(Timer.invoiced_status == "Unbilled", Timer.invoiced_status.is_(None), Timer.invoiced_status == ""),
+        db.or_(Timer.billable.is_(True), Timer.billable.is_(None)),
+    ).order_by(Timer.start_time, Timer.id).all()
     return jsonify({
         "matters": [{"id": m.id, "reference": m.reference, "name": m.name} for m in Matter.query.filter_by(client_id=client_id).order_by(Matter.name).all()],
         "contacts": [{"id": c.id, "display_name": c.display_name} for c in Contact.query.filter(db.or_(Contact.client_id == client_id, Contact.client_id.is_(None))).order_by(Contact.display_name).all()],
@@ -174,7 +181,7 @@ def edit_fee_note_v3(draft_id):
 app.view_functions["edit_fee_note"] = edit_fee_note_v3
 
 
-def apply_line_v3(line):
+def apply_line_v3(line, draft=None):
     line.sort_order = int(request.form.get("sort_order") or line.sort_order or 0)
     line.included = "included" in request.form if "included" in request.form or request.endpoint == "update_fee_line_v3" else True
     line.line_type = request.form.get("line_type", line.line_type)
@@ -187,7 +194,8 @@ def apply_line_v3(line):
     entered = float(request.form.get("amount") or 0)
     calculated = line.quantity * float(line.rate)
     line.amount = signed_amount(line.line_type, entered if line.amount_override else calculated)
-    line.vat_treatment = request.form.get("vat_treatment", line.draft.vat_treatment)
+    draft = draft or line.draft
+    line.vat_treatment = request.form.get("vat_treatment", draft.vat_treatment)
     line.vat_rate = 0 if line.vat_treatment in {"Reverse charge", "Other exemption"} else float(request.form.get("vat_rate") or 0)
     line.include_in_detail = "include_in_detail" in request.form
 
@@ -210,7 +218,8 @@ app.view_functions["update_fee_line"] = update_fee_line_v3
 def add_fee_line_v3(draft_id):
     order = (db.session.query(db.func.max(FeeNoteLine.sort_order)).filter_by(draft_id=draft_id).scalar() or 0) + 1
     line = FeeNoteLine(draft_id=draft_id, sort_order=order, included=True, description=request.form["description"])
-    apply_line_v3(line)
+    draft = db.session.get(FeeNoteDraft, draft_id)
+    apply_line_v3(line, draft)
     line.included = True
     db.session.add(line)
     db.session.commit()
@@ -242,3 +251,73 @@ def update_fee_note_v3(draft_id):
 
 
 app.view_functions["update_fee_note"] = update_fee_note_v3
+
+
+# CHANGE 3.1 - password management
+class PasswordResetRequest(db.Model):
+    __tablename__ = "password_reset_request_v3"
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(255), nullable=False, index=True)
+    requested_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    resolved_at = db.Column(db.DateTime(timezone=True))
+    resolved_by = db.Column(db.Integer, db.ForeignKey("user.id"))
+
+with app.app_context():
+    db.create_all()
+
+LOGIN_PAGE = r'''{% extends "base.html" %}{% block content %}<section class="card narrow"><h1>MARS-IP Time & Billing</h1><form method="post"><label>Email<input type="email" name="email" required></label><label>Password<input type="password" name="password" required></label><button>Sign in</button></form><p><a href="{{url_for('register')}}">Create account</a> | <a href="{{url_for('forgot_password_v3')}}">Forgot password?</a></p></section>{% endblock %}'''
+
+def login_v3():
+    if request.method == "POST":
+        user = User.query.filter(db.func.lower(User.email) == request.form["email"].strip().lower(), User.active.is_(True)).first()
+        if user and check_password_hash(user.password_hash, request.form["password"]):
+            session.clear(); session.update(uid=user.id, name=user.display_name, role=user.system_role)
+            return redirect(url_for("timer"))
+        flash("Invalid login details.")
+    return render_template_string(LOGIN_PAGE)
+app.view_functions["login"] = login_v3
+
+@login_required
+def change_password_v3():
+    if request.method == "POST":
+        user = db.session.get(User, session["uid"])
+        current=request.form.get("current_password",""); new=request.form.get("new_password",""); confirm=request.form.get("confirm","")
+        if not check_password_hash(user.password_hash,current): flash("The current password is incorrect.")
+        elif len(new)<10 or new!=confirm: flash("Use matching new passwords with at least 10 characters.")
+        else:
+            user.password_hash=generate_password_hash(new); db.session.commit(); flash("Password changed successfully."); return redirect(url_for("timer"))
+    return render_template_string(r'''{% extends "base.html" %}{% block content %}<section class="card narrow"><h1>Change password</h1><form method="post"><label>Current password<input type="password" name="current_password" required></label><label>New password<input type="password" minlength="10" name="new_password" required></label><label>Confirm new password<input type="password" minlength="10" name="confirm" required></label><button>Change password</button></form></section>{% endblock %}''')
+app.add_url_rule("/account/password","change_password_v3",change_password_v3,methods=["GET","POST"])
+
+def forgot_password_v3():
+    if request.method == "POST":
+        email=request.form.get("email","").strip().lower()
+        user=User.query.filter(db.func.lower(User.email)==email).first()
+        if user and not PasswordResetRequest.query.filter_by(email=email,resolved_at=None).first():
+            db.session.add(PasswordResetRequest(email=email)); db.session.commit()
+        flash("If the account exists, a password-reset request has been sent to the administrator.")
+        return redirect(url_for("login"))
+    return render_template_string(r'''{% extends "base.html" %}{% block content %}<section class="card narrow"><h1>Forgot password</h1><p>Enter the account email. The administrator can set a temporary password.</p><form method="post"><label>Email<input type="email" name="email" required></label><button>Request password reset</button></form><p><a href="{{url_for('login')}}">Return to sign in</a></p></section>{% endblock %}''')
+app.add_url_rule("/forgot-password","forgot_password_v3",forgot_password_v3,methods=["GET","POST"])
+
+@app.post("/admin/change3/reset-password/<int:request_id>")
+@login_required
+@admin_required
+def admin_reset_password_v3(request_id):
+    reset=db.session.get(PasswordResetRequest,request_id); temporary=request.form.get("temporary_password","")
+    if not reset or reset.resolved_at: flash("Reset request is unavailable.")
+    elif len(temporary)<10: flash("The temporary password must contain at least 10 characters.")
+    else:
+        user=User.query.filter(db.func.lower(User.email)==reset.email.lower()).first()
+        if user:
+            user.password_hash=generate_password_hash(temporary); reset.resolved_at=datetime.now(timezone.utc); reset.resolved_by=session["uid"]; db.session.commit(); flash("Temporary password saved.")
+    return redirect(url_for("admin"))
+
+ADMIN_V3 = r'''{% extends "base.html" %}{% block content %}<h1>Administration</h1><section class="card"><p>{{users|length}} users | {{client_count}} clients | {{matter_count}} matters</p><p><a href="{{url_for('change_password_v3')}}">Change my password</a></p><form method="post" action="{{url_for('reload_data')}}"><button>Reload master workbook</button></form></section>{% if resets %}<section class="card"><h2>Password reset requests</h2><table><tr><th>Account</th><th>Requested</th><th>Temporary password</th><th></th></tr>{% for r in resets %}<tr><form method="post" action="{{url_for('admin_reset_password_v3',request_id=r.id)}}"><td>{{r.email}}</td><td>{{r.requested_at}}</td><td><input type="password" minlength="10" name="temporary_password" required></td><td><button>Set temporary password</button></td></form></tr>{% endfor %}</table></section>{% endif %}<section class="card wide"><h2>User access and billing rates</h2><table><tr><th>User</th><th>Role</th><th>Hourly rate</th><th>Daily rate</th><th>Active</th><th>Assigned matters</th><th></th></tr>{% for u in users %}<tr><form method="post" action="{{url_for('change2_user',user_id=u.id)}}"><td>{{u.display_name}}<br><small>{{u.email}}</small></td><td><select name="system_role"><option {% if u.system_role=='Timekeeper' %}selected{% endif %}>Timekeeper</option><option {% if u.system_role=='Administrator' %}selected{% endif %}>Administrator</option></select></td><td><input type="number" step="0.01" name="hourly_rate" value="{{u.default_hourly_rate or 0}}"></td><td><input type="number" step="0.01" name="daily_rate" value="{{u.default_daily_rate or 0}}"></td><td><input type="checkbox" name="active" {% if u.active %}checked{% endif %}></td><td><select name="matter_ids" multiple size="7">{% for m in matters %}<option value="{{m.id}}" {% if m.id in assigned[u.id] %}selected{% endif %}>{{m.reference or ''}} | {{m.name}}</option>{% endfor %}</select></td><td><button>Save</button></td></form></tr>{% endfor %}</table></section><section class="card wide"><h2>Recorded time</h2><table><tr><th>User</th><th>Client</th><th>Matter</th><th>Service</th><th>Status</th><th>Billable hours</th><th>Rate</th><th>Amount</th><th></th></tr>{% for t in entries %}<tr><form method="post" action="{{url_for('edit_entry',timer_id=t.id)}}"><td>{{t.user.display_name}}</td><td>{{t.client.name}}</td><td>{{t.matter.name}}</td><td><input name="services" value="{{t.services}}"></td><td>{{t.status}}</td><td><input type="number" step="0.0001" name="billable_hours" value="{{t.billable_hours or 0}}"></td><td><input type="number" step="0.01" name="applied_rate" value="{{t.applied_rate or 0}}"></td><td>{{t.amount or 0}}</td><td><button>Save</button></td></form></tr>{% endfor %}</table></section>{% endblock %}'''
+
+def admin_v3():
+    users=User.query.order_by(User.display_name).all(); matters=Matter.query.order_by(Matter.name).all(); Assignment=previous.EmployeeMatterAssignment
+    assigned={u.id:set() for u in users}
+    for item in Assignment.query.filter_by(active=True).all(): assigned.setdefault(item.user_id,set()).add(item.matter_id)
+    return render_template_string(ADMIN_V3,users=users,matters=matters,assigned=assigned,entries=Timer.query.order_by(Timer.id.desc()).all(),resets=PasswordResetRequest.query.filter_by(resolved_at=None).order_by(PasswordResetRequest.requested_at).all(),client_count=Client.query.count(),matter_count=Matter.query.count())
+app.view_functions["admin"]=login_required(admin_required(admin_v3))
