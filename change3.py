@@ -321,3 +321,84 @@ def admin_v3():
     for item in Assignment.query.filter_by(active=True).all(): assigned.setdefault(item.user_id,set()).add(item.matter_id)
     return render_template_string(ADMIN_V3,users=users,matters=matters,assigned=assigned,entries=Timer.query.order_by(Timer.id.desc()).all(),resets=PasswordResetRequest.query.filter_by(resolved_at=None).order_by(PasswordResetRequest.requested_at).all(),client_count=Client.query.count(),matter_count=Matter.query.count())
 app.view_functions["admin"]=login_required(admin_required(admin_v3))
+
+# ---------------- CHANGE 3.2: ROBUST EMPLOYEE TIMER PAGE ----------------
+TIMER_V3 = r'''{% extends "base.html" %}{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+  <div><h1 style="margin-bottom:4px">Time recording</h1><p style="margin-top:0">Record professional time against the appropriate client and matter.</p></div>
+  <a href="{{url_for('change_password_v3')}}" style="background:#273746;color:white;text-decoration:none;padding:10px 14px;border-radius:6px;font-weight:600">Change password</a>
+</div>
+<section class="card"><h2>Start a new time entry</h2>
+<form method="post" action="{{url_for('start_timer')}}">
+<div class="grid">
+<label>Client<select id="client" name="client_id" required><option value="">Select a client</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label>
+<label>Matter / project<select id="matter" name="matter_id" required><option value="">Select a client first</option></select></label>
+<label>Work category<select name="category"><option>Research</option><option>Drafting</option><option>Filing</option><option>Meeting</option><option>Correspondence</option><option>Review</option><option>Hearing</option><option>Travel</option><option>Administrative</option><option>Surveillance</option><option>Other</option><option>Free data entry</option></select></label>
+<label>Billable<select name="billable"><option value="1">Yes</option><option value="0">No</option></select></label>
+</div>
+<label>Service description<textarea name="services" required></textarea></label><label>Internal notes<input name="notes"></label><button>Start timer</button></form></section>
+<h2>Active time entries</h2><div class="cards">{% for t in active %}<section class="card"><h3>{{t.client_name}}</h3><p><b>{{t.matter_name}}</b><br>{{t.services}}</p><div class="clock" data-seconds="{{t.elapsed_seconds}}" data-running="{{1 if t.status=='Running' else 0}}">00:00:00</div><p>{{t.status}}</p>{% if t.status=='Running' %}<form method="post" action="{{url_for('pause_timer',timer_id=t.id)}}"><button class="secondary">Pause</button></form>{% else %}<form method="post" action="{{url_for('resume_timer',timer_id=t.id)}}"><button>Resume</button></form>{% endif %}<form method="post" action="{{url_for('stop_timer',timer_id=t.id)}}"><label>Billable hours override<input type="number" min="0" step="0.0001" name="billable_hours"></label><label>Notes<input name="notes" value="{{t.notes or ''}}"></label><button class="danger">Stop and save</button></form></section>{% else %}<section class="card"><p>No active time entries.</p></section>{% endfor %}</div>
+<section class="card wide"><h2>Recently completed entries</h2><table><tr><th>Date</th><th>Client</th><th>Matter</th><th>Service</th><th>Worked</th><th>Billable</th><th>Rate</th><th>Amount</th></tr>{% for t in recent %}<tr><td>{{t.date}}</td><td>{{t.client_name}}</td><td>{{t.matter_name}}</td><td>{{t.services}}</td><td>{{t.worked_hours}}</td><td>{{t.billable_hours}}</td><td>{{t.applied_rate}}</td><td>{{t.amount}}</td></tr>{% else %}<tr><td colspan="8">No completed entries.</td></tr>{% endfor %}</table></section>
+<script>
+const client=document.getElementById('client'), matter=document.getElementById('matter');
+client.addEventListener('change',async()=>{matter.innerHTML='<option value="">Loading...</option>';if(!client.value){matter.innerHTML='<option value="">Select a client first</option>';return;}try{const response=await fetch('/api/matters/'+client.value);if(!response.ok)throw new Error('Unable to load matters');const data=await response.json();matter.innerHTML='<option value="">Select a matter</option>'+data.map(x=>`<option value="${x.id}">${x.reference||''}${x.reference?' | ':''}${x.name}</option>`).join('');}catch(error){matter.innerHTML='<option value="">Unable to load matters</option>';}});
+document.querySelectorAll('.clock').forEach(element=>{let seconds=Number(element.dataset.seconds||0);const draw=()=>{const h=Math.floor(seconds/3600),m=Math.floor((seconds%3600)/60),s=Math.floor(seconds%60);element.textContent=[h,m,s].map(value=>String(value).padStart(2,'0')).join(':');if(element.dataset.running==='1')seconds+=1;};draw();setInterval(draw,1000);});
+</script>{% endblock %}'''
+
+
+def _safe_dt(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _safe_elapsed(entry):
+    now = datetime.now(timezone.utc)
+    start = _safe_dt(entry.start_time)
+    if not start:
+        return 0
+    seconds = max(0.0, (now - start).total_seconds() - float(entry.paused_seconds or 0))
+    if entry.status == "Paused" and entry.paused_at:
+        seconds = max(0.0, seconds - (now - _safe_dt(entry.paused_at)).total_seconds())
+    return seconds
+
+
+@login_required
+def timer_v3():
+    user_id = session["uid"]
+    rows = (
+        db.session.query(Timer, Client.name.label("client_name"), Matter.name.label("matter_name"))
+        .join(Client, Timer.client_id == Client.id)
+        .join(Matter, Timer.matter_id == Matter.id)
+        .filter(Timer.user_id == user_id)
+        .order_by(Timer.id.desc())
+        .all()
+    )
+    active = []
+    recent = []
+    for entry, client_name, matter_name in rows:
+        item = {
+            "id": entry.id,
+            "client_name": client_name,
+            "matter_name": matter_name,
+            "services": entry.services or "",
+            "notes": entry.notes or "",
+            "status": entry.status or "Stopped",
+            "elapsed_seconds": _safe_elapsed(entry),
+            "date": _safe_dt(entry.start_time).date().isoformat() if entry.start_time else "",
+            "worked_hours": entry.worked_hours or 0,
+            "billable_hours": entry.billable_hours or 0,
+            "applied_rate": entry.applied_rate or 0,
+            "amount": entry.amount or 0,
+        }
+        if item["status"] in {"Running", "Paused"}:
+            active.append(item)
+        elif len(recent) < 20:
+            recent.append(item)
+    return render_template_string(TIMER_V3, clients=Client.query.order_by(Client.name).all(), active=active, recent=recent)
+
+
+# Replace the existing timer view while retaining /timer and the existing endpoint name.
+app.view_functions["timer"] = timer_v3
