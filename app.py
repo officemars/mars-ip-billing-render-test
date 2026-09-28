@@ -13,7 +13,17 @@ BASE=Path(__file__).resolve().parent
 ASSETS=BASE/'assets'
 app=Flask(__name__)
 app.secret_key=os.environ.get('SECRET_KEY','dev-only-change-me')
-app.config['SQLALCHEMY_DATABASE_URI']=os.environ.get('DATABASE_URL','sqlite:///local-test.db').replace('postgres://','postgresql://',1)
+db_url = os.environ["DATABASE_URL"]
+ 
+if db_url.startswith("postgresql://"):
+	db_url = db_url.replace(
+	"postgresql://",
+	"postgresql+psycopg://",
+	1
+)
+ 
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS']=False
 app.config['SESSION_COOKIE_HTTPONLY']=True
 app.config['SESSION_COOKIE_SAMESITE']='Lax'
