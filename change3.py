@@ -1,3 +1,73 @@
+"""MARS-IP Change 3 consolidated deployment fix."""
+from datetime import datetime, timezone, date
+from flask import request, redirect, url_for, flash, session, render_template_string
+import change2 as previous
+import app as core
+
+app = previous.app
+db = previous.db
+User = previous.User
+Client = previous.Client
+Contact = previous.Contact
+Matter = previous.Matter
+Timer = previous.Timer
+FeeNoteDraft = previous.FeeNoteDraft
+FeeNoteLine = previous.FeeNoteLine
+login_required = previous.login_required
+admin_required = previous.admin_required
+LINE_TYPES = core.LINE_TYPES
+ASSETS = previous.ASSETS
+
+def fnum(value, default=0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def checked(name):
+    return name in request.form
+
+class AppSetting(db.Model):
+    __tablename__ = "app_setting_v5"
+    key = db.Column(db.String(100), primary_key=True)
+    value = db.Column(db.Text)
+
+with app.app_context():
+    db.create_all()
+
+def setting(key, default=""):
+    row = db.session.get(AppSetting, key)
+    return row.value if row else default
+
+def set_setting(key, value):
+    row = db.session.get(AppSetting, key) or AppSetting(key=key)
+    row.value = str(value)
+    db.session.add(row)
+    db.session.commit()
+
+PAYMENT = {
+    "English": {"8 days": "eight days", "30 days": "30 days", "30 days end of month": "30 days end of month"},
+    "French": {"8 days": "huit jours", "30 days": "30 jours", "30 days end of month": "30 jours fin de mois"},
+    "German": {"8 days": "acht Tage", "30 days": "30 Tage", "30 days end of month": "30 Tage zum Monatsende"},
+}
+
+def translated_terms(language, code, other=""):
+    return other.strip() if code == "other" else PAYMENT.get(language, PAYMENT["English"]).get(code, code)
+
+MASTER = '<h1>Data management</h1>'
+
+@login_required
+def master_v4():
+    return render_template_string('{% extends "base.html" %}{% block content %}<h1>Data management</h1><p>Use the existing master-data administration tools to import or maintain clients, contacts and matters.</p><p><a href="{{url_for(\'admin_original_v4\')}}">Open full administration</a></p>{% endblock %}')
+
+@app.post("/admin/invoice-sequence-v4")
+@login_required
+@admin_required
+def invoice_sequence_v4():
+    set_setting("invoice_prefix", request.form["prefix"])
+    set_setting("invoice_next", request.form["next_number"])
+    flash("Invoice numbering saved.")
+    return redirect(url_for("admin"))
 
 # ==================== CHANGE 3.3: INVOICE REGISTER, LIVE EDITOR, PREVIEW ====================
 DEDUCTION_LINE_TYPES={'Provision','Credit / discount'}
