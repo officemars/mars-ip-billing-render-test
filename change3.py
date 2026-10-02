@@ -355,13 +355,7 @@ COMBINED_EDITOR_V5 = r'''{% extends "base.html" %}{% block content %}
 <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><div><h1>Fee note preparation</h1><p>{{draft.invoice_number or 'Draft'}} · {{draft.client_name}} · {{draft.matter_text}}</p></div><div><a href="{{url_for('invoice_register_v5')}}">Invoice register</a> | <a href="{{url_for('invoice_preview_v5',draft_id=draft.id)}}">Preview invoice</a></div></div>
 <section class="card"><h2>Invoice controls</h2><form method="post" action="{{url_for('invoice_controls_v5',draft_id=draft.id)}}"><div class="grid"><label>Invoice number<input name="invoice_number" value="{{draft.invoice_number or ''}}" placeholder="Assigned on issue"></label><label>Payment deadline<select name="payment_choice"><option value="8 days">{{labels[0]}}</option><option value="30 days">{{labels[1]}}</option><option value="30 days end of month">{{labels[2]}}</option><option value="other">{{labels[3]}}</option></select></label><label>Other deadline<input name="payment_other"></label></div><button>Save invoice controls</button></form></section>
 <section class="card wide"><h2>Full editable fee note</h2><iframe id="fullEditor" src="{{url_for('edit_fee_note_original_v4',draft_id=draft.id)}}" style="width:100%;min-height:1250px;border:0"></iframe></section>
-<section class="card" style="position:sticky;bottom:0;border:2px solid #ee7933"><div class="grid"><h3>Net: <span id="net">{{draft.net_total}}</span> {{draft.currency}}</h3><h3>VAT: <span id="vat">{{draft.vat_amount}}</span> {{draft.currency}}</h3><h2>Total gross: <span id="gross">{{draft.gross_total}}</span> {{draft.currency}}</h2></div><a href="{{url_for('invoice_preview_v5',draft_id=draft.id)}}">Preview before download</a></section>
-<script>
-const frame=document.getElementById('fullEditor');
-function num(v){return parseFloat(v)||0;}
-function updateFromFrame(){try{const d=frame.contentDocument;if(!d)return;let net=0,vat=0;const rows=[...d.querySelectorAll('tr')];rows.forEach(row=>{const included=row.querySelector('input[name="included"]');if(!included||!included.checked)return;const qty=num(row.querySelector('input[name="quantity"]')?.value),rate=num(row.querySelector('input[name="rate"]')?.value),manual=row.querySelector('input[name="amount_override"]')?.checked;let amount=manual?num(row.querySelector('input[name="amount"]')?.value):qty*rate;const type=row.querySelector('[name="line_type"]')?.value||'';if(type==='Provision'||type==='Credit / discount')amount=-Math.abs(amount);const amountBox=row.querySelector('input[name="amount"]');if(amountBox)amountBox.value=amount.toFixed(2);net+=amount;const treatment=row.querySelector('[name="vat_treatment"]')?.value||'';let vr=num(row.querySelector('input[name="vat_rate"]')?.value);if(treatment==='Reverse charge'||treatment==='Other exemption')vr=0;vat+=amount*vr/100;});document.getElementById('net').textContent=net.toFixed(2);document.getElementById('vat').textContent=vat.toFixed(2);document.getElementById('gross').textContent=(net+vat).toFixed(2);}catch(e){}}
-frame.addEventListener('load',()=>{updateFromFrame();try{frame.contentDocument.querySelectorAll('input,select').forEach(x=>{x.addEventListener('input',updateFromFrame);x.addEventListener('change',updateFromFrame);});}catch(e){}});
-</script>{% endblock %}'''
+<section class="card"><a href="{{url_for('invoice_preview_v5',draft_id=draft.id)}}">Preview before download</a></section>{% endblock %}'''
 
 # Keep the proven full editor already saved above as edit_fee_note_original_v4.
 def edit_fee_note_v5(draft_id):
@@ -400,3 +394,67 @@ MASTER=MASTER.replace('<h1>Clients, contacts and matters</h1>','<h1>Data managem
 def admin_v5():
     return render_template_string(r'''{% extends "base.html" %}{% block content %}<h1>Administration</h1><div class="cards"><section class="card"><h2>Invoice register</h2><p>Review, edit, preview and download previous fee notes.</p><a href="{{url_for('invoice_register_v5')}}">Open invoice register</a></section><section class="card"><h2>Data management</h2><p>Upload Excel sheets and add or correct clients, contacts, matters and mappings.</p><a href="{{url_for('master_v4')}}">Open Data management</a></section><section class="card"><h2>Users and rates</h2><p>Manage users, rates, assignments and recorded time.</p><a href="{{url_for('admin_original_v4')}}">Open user administration</a></section></div><section class="card"><h2>Invoice numbering</h2><form method="post" action="{{url_for('invoice_sequence_v4')}}"><div class="grid"><label>Invoice prefix<input name="prefix" value="{{prefix}}"></label><label>Next number<input type="number" min="1" name="next_number" value="{{next_number}}"></label></div><button>Save numbering</button></form></section>{% endblock %}''',prefix=setting('invoice_prefix','MARS-INV-'+str(date.today().year)+'-'),next_number=setting('invoice_next','1'))
 app.view_functions['admin']=login_required(admin_required(admin_v5))
+
+# ---------- Change 3.6: repair admin Data Management and add safe delete/mapping controls ----------
+DATA_MANAGEMENT_V6 = r'''{% extends "base.html" %}{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center"><div><h1>Data management</h1><p>Import, add, edit, remove and map clients, contacts and matters.</p></div><a href="{{url_for('admin')}}">Back to Administration</a></div>
+<section class="card"><h2>Import updated Excel workbook</h2><p>The workbook may contain Clients, Contacts and Matters sheets. Matching external IDs are updated and new records are added.</p><form method="post" action="{{url_for('upload_master_v4')}}" enctype="multipart/form-data"><input type="file" name="file" accept=".xlsx" required><button>Import workbook</button></form></section>
+<section class="card wide"><h2>Clients</h2><form method="post" action="{{url_for('save_client_v6')}}"><div class="grid"><label>Existing client<select name="id"><option value="">New client</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label><label>Name<input name="name" required></label><label>Billing name<input name="billing_name"></label><label>Address<textarea name="address"></textarea></label><label>Country<input name="country"></label><label>VAT number<input name="vat_number"></label><label>Language<select name="language"><option>English</option><option>French</option><option>German</option></select></label><label>Currency<input name="currency" value="EUR"></label><label>Hourly rate<input type="number" step="0.01" name="rate"></label></div><button>Save client</button></form><h3>Existing clients</h3><table><tr><th>Name</th><th>Billing name</th><th>Country</th><th>VAT number</th><th></th></tr>{% for c in clients %}<tr><td>{{c.name}}</td><td>{{c.billing_name}}</td><td>{{c.country}}</td><td>{{c.vat_number}}</td><td><form method="post" action="{{url_for('delete_client_v6',client_id=c.id)}}" onsubmit="return confirm('Remove this client only if no matter or time entry uses it.');"><button class="danger">Remove</button></form></td></tr>{% endfor %}</table></section>
+<section class="card wide"><h2>Contacts</h2><form method="post" action="{{url_for('save_contact_v6')}}"><div class="grid"><label>Existing contact<select name="id"><option value="">New contact</option>{% for x in contacts %}<option value="{{x.id}}">{{x.display_name}}</option>{% endfor %}</select></label><label>Name<input name="name" required></label><label>Email<input type="email" name="email"></label><label>Phone<input name="phone"></label><label>Mapped client<select name="client_id"><option value="">No client</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label></div><button>Save contact and mapping</button></form><h3>Existing contacts</h3><table><tr><th>Name</th><th>Email</th><th>Mapped client</th><th></th></tr>{% for x in contacts %}<tr><td>{{x.display_name}}</td><td>{{x.email}}</td><td>{{client_names.get(x.client_id,'')}}</td><td><form method="post" action="{{url_for('delete_contact_v6',contact_id=x.id)}}" onsubmit="return confirm('Remove this contact?');"><button class="danger">Remove</button></form></td></tr>{% endfor %}</table></section>
+<section class="card wide"><h2>Matters</h2><form method="post" action="{{url_for('save_matter_v6')}}"><div class="grid"><label>Existing matter<select name="id"><option value="">New matter</option>{% for m in matters %}<option value="{{m.id}}">{{m.reference or ''}} | {{m.name}}</option>{% endfor %}</select></label><label>Reference<input name="reference"></label><label>Name<input name="name" required></label><label>Mapped client<select name="client_id" required>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label><label>Primary contact<select name="contact_id"><option value="">None</option>{% for x in contacts %}<option value="{{x.id}}">{{x.display_name}}</option>{% endfor %}</select></label><label>Hourly rate<input type="number" step="0.01" name="rate"></label></div><button>Save matter and mapping</button></form><h3>Existing matters</h3><table><tr><th>Reference</th><th>Name</th><th>Mapped client</th><th>Primary contact</th><th></th></tr>{% for m in matters %}<tr><td>{{m.reference}}</td><td>{{m.name}}</td><td>{{client_names.get(m.client_id,'')}}</td><td>{{contact_names.get(m.primary_contact_id,'')}}</td><td><form method="post" action="{{url_for('delete_matter_v6',matter_id=m.id)}}" onsubmit="return confirm('Remove this matter only if no time entry uses it.');"><button class="danger">Remove</button></form></td></tr>{% endfor %}</table></section>
+{% endblock %}'''
+
+def data_management_v6():
+    clients=Client.query.order_by(Client.name).all(); contacts=Contact.query.order_by(Contact.display_name).all(); matters=Matter.query.order_by(Matter.name).all()
+    return render_template_string(DATA_MANAGEMENT_V6,clients=clients,contacts=contacts,matters=matters,client_names={c.id:c.name for c in clients},contact_names={x.id:x.display_name for x in contacts})
+
+# The working file defined master_v4 but did not register a GET URL. This explicit rule fixes /admin.
+app.add_url_rule('/admin/data-management','master_v4',login_required(admin_required(data_management_v6)),methods=['GET'])
+
+@app.post('/admin/data-management/client/save')
+@login_required
+@admin_required
+def save_client_v6():
+    c=db.session.get(Client,int(request.form['id'])) if request.form.get('id') else Client(external_id='USR-'+datetime.now().strftime('%Y%m%d%H%M%S%f'))
+    c.name=request.form['name'].strip(); c.billing_name=request.form.get('billing_name','').strip() or c.name; c.address=request.form.get('address','').strip(); c.country=request.form.get('country','').strip(); c.vat_number=request.form.get('vat_number','').strip(); c.language=request.form.get('language') or 'English'; c.currency=request.form.get('currency') or 'EUR'; c.client_hourly_rate=fnum(request.form.get('rate'),None)
+    db.session.add(c); db.session.commit(); flash('Client saved.'); return redirect(url_for('master_v4'))
+
+@app.post('/admin/data-management/contact/save')
+@login_required
+@admin_required
+def save_contact_v6():
+    x=db.session.get(Contact,int(request.form['id'])) if request.form.get('id') else Contact(external_id='USR-'+datetime.now().strftime('%Y%m%d%H%M%S%f'))
+    x.display_name=request.form['name'].strip(); x.email=request.form.get('email','').strip(); x.phone=request.form.get('phone','').strip(); x.client_id=int(request.form['client_id']) if request.form.get('client_id') else None
+    db.session.add(x); db.session.commit(); flash('Contact and client mapping saved.'); return redirect(url_for('master_v4'))
+
+@app.post('/admin/data-management/matter/save')
+@login_required
+@admin_required
+def save_matter_v6():
+    m=db.session.get(Matter,int(request.form['id'])) if request.form.get('id') else Matter(external_id='USR-'+datetime.now().strftime('%Y%m%d%H%M%S%f'))
+    m.reference=request.form.get('reference','').strip(); m.name=request.form['name'].strip(); m.client_id=int(request.form['client_id']); m.primary_contact_id=int(request.form['contact_id']) if request.form.get('contact_id') else None; m.matter_hourly_rate=fnum(request.form.get('rate'),None); m.billable=True
+    db.session.add(m); db.session.commit(); flash('Matter, client and contact mapping saved.'); return redirect(url_for('master_v4'))
+
+@app.post('/admin/data-management/client/<int:client_id>/delete')
+@login_required
+@admin_required
+def delete_client_v6(client_id):
+    if Matter.query.filter_by(client_id=client_id).first() or Timer.query.filter_by(client_id=client_id).first() or FeeNoteDraft.query.filter_by(client_id=client_id).first(): flash('Client cannot be removed because matters, time entries or fee notes refer to it.')
+    else: db.session.delete(db.session.get(Client,client_id)); db.session.commit(); flash('Client removed.')
+    return redirect(url_for('master_v4'))
+
+@app.post('/admin/data-management/contact/<int:contact_id>/delete')
+@login_required
+@admin_required
+def delete_contact_v6(contact_id):
+    if Matter.query.filter_by(primary_contact_id=contact_id).first() or FeeNoteDraft.query.filter_by(contact_id=contact_id).first(): flash('Contact cannot be removed because a matter or fee note refers to it.')
+    else: db.session.delete(db.session.get(Contact,contact_id)); db.session.commit(); flash('Contact removed.')
+    return redirect(url_for('master_v4'))
+
+@app.post('/admin/data-management/matter/<int:matter_id>/delete')
+@login_required
+@admin_required
+def delete_matter_v6(matter_id):
+    if Timer.query.filter_by(matter_id=matter_id).first() or FeeNoteDraft.query.filter_by(matter_id=matter_id).first(): flash('Matter cannot be removed because time entries or fee notes refer to it.')
+    else: db.session.delete(db.session.get(Matter,matter_id)); db.session.commit(); flash('Matter removed.')
+    return redirect(url_for('master_v4'))
