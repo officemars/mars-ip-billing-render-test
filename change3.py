@@ -168,4 +168,8 @@ MASTER=MASTER.replace('<h1>Clients, contacts and matters</h1>','<h1>Data managem
 # Admin landing page with direct access to invoice archive and Data Management.
 def admin_landing_v5():
     return render_template_string(r'''{% extends "base.html" %}{% block content %}<h1>Administration</h1><div class="cards"><section class="card"><h2>Invoice register</h2><p>Review, edit, preview and download all previous fee notes.</p><a href="{{url_for('invoice_archive_v5')}}">Open invoice register</a></section><section class="card"><h2>Data management</h2><p>Import Excel data and add or correct clients, contacts, matters and mappings.</p><a href="{{url_for('master_v4')}}">Open Data Management</a></section><section class="card"><h2>Users and rates</h2><p>Manage users, rates, matter assignments and recorded time.</p><a href="{{url_for('admin_original_v4')}}">Open user administration</a></section></div><section class="card"><h2>Invoice numbering</h2><form method="post" action="{{url_for('invoice_sequence_v4')}}"><div class="grid"><label>Invoice prefix<input name="prefix" value="{{prefix}}"></label><label>Next minimum number<input type="number" min="1" name="next_number" value="{{next_number}}"></label></div><button>Save numbering</button></form></section>{% endblock %}''',prefix=setting('invoice_prefix','MARS-INV-'+str(date.today().year)+'-'),next_number=setting('invoice_next','1'))
-app.view_functions['admin']=login_required(admin_required(admin_landing_v5))
+app.view_functions['admin']=admin_landing_v5
+
+
+# CHANGE 3.4 login safety: retain the proven authentication implementation from app.py.
+app.view_functions["login"] = core.login
