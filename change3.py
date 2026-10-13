@@ -542,3 +542,99 @@ def upload_timekeeper_v7():
         u.active=str(values.get('Active?') or 'Yes').lower() not in {'no','false','0'};u.default_hourly_rate=fnum(values.get('Default Hourly Rate'),0);db.session.add(u);db.session.flush();save_fact('timekeeper',u.id,{'title':values.get('Title'),'first_name':values.get('First Name'),'last_name':values.get('Last Name'),'role_position':values.get('Role / Position'),'phone':values.get('Phone'),'notes':values.get('Notes'),'default_daily_rate':fnum(values.get('Default Daily Rate'),0),'currency':values.get('Currency') or 'EUR','rate_notes':values.get('Rate Notes')});db.session.commit();flash('Timekeeper Record imported.')
     except Exception as exc:db.session.rollback();flash('Timekeeper import failed: '+str(exc))
     return redirect(url_for('master_v4'))
+
+
+# ==================== CHANGE 3.8: CUSTOM START, USER LIFECYCLE, LINKS AND RATES ====================
+
+def parse_custom_start_v8(value):
+    if not value:
+        return datetime.now(timezone.utc)
+    parsed=datetime.fromisoformat(value)
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+TIMER_PAGE_V8=TIMER_PAGE_V7.replace(
+    '<label>Billable<select name="billable"><option value="1">Yes</option><option value="0">No</option></select></label></div>',
+    '<label>Billable<select name="billable"><option value="1">Yes</option><option value="0">No</option></select></label><label>Start date and time<input type="datetime-local" name="custom_start" value="{{now_local}}"></label></div>'
+).replace(
+    '<button>Start timer now</button>',
+    '<button>Start timer</button>'
+).replace(
+    '<h2>Active entries</h2>',
+    '<section class="card"><h2>My hourly rate</h2><form method="post" action="{{url_for(\'my_rate_v8\')}}"><label>Default hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="{{current_user.default_hourly_rate or 0}}" required></label><button>Save my hourly rate</button></form></section><h2>Active entries</h2>'
+)
+
+def timer_v8():
+    current_user=db.session.get(User,session['uid'])
+    active=Timer.query.filter(Timer.user_id==session['uid'],Timer.status.in_(['Running','Paused'])).order_by(Timer.id.desc()).all()
+    for entry in active:entry.seconds=elapsed_safe(entry)
+    recent=Timer.query.filter_by(user_id=session['uid'],status='Stopped').order_by(Timer.id.desc()).limit(30).all()
+    return render_template_string(TIMER_PAGE_V8,clients=Client.query.order_by(Client.name).all(),active=active,recent=recent,current_user=current_user,now_local=datetime.now().strftime('%Y-%m-%dT%H:%M'))
+
+def start_timer_v8():
+    user=db.session.get(User,session['uid']);client=db.session.get(Client,int(request.form['client_id']));matter=db.session.get(Matter,int(request.form['matter_id']))
+    rate=matter.matter_hourly_rate if matter.matter_hourly_rate is not None else client.client_hourly_rate if client.client_hourly_rate is not None else user.default_hourly_rate
+    entry=Timer(user_id=user.id,client_id=client.id,matter_id=matter.id,category=None,services=request.form['services'].strip(),notes=request.form.get('notes',''),start_time=parse_custom_start_v8(request.form.get('custom_start')),status='Running',paused_seconds=0,timekeeper_rate=user.default_hourly_rate,client_rate=client.client_hourly_rate,matter_rate=matter.matter_hourly_rate,applied_rate=rate or 0,billable=matter.billable and request.form.get('billable')=='1',invoiced_status='Unbilled')
+    db.session.add(entry);db.session.commit();flash('Timer started.');return redirect(url_for('timer'))
+
+@app.post('/account/hourly-rate-v8')
+@login_required
+def my_rate_v8():
+    user=db.session.get(User,session['uid']);user.default_hourly_rate=max(0,fnum(request.form.get('hourly_rate'),0));db.session.commit();flash('Your hourly rate was updated.');return redirect(url_for('timer'))
+
+app.view_functions['timer']=login_required(timer_v8)
+app.view_functions['start_timer_v4']=login_required(start_timer_v8)
+
+USER_ADMIN_V8=r'''{% extends "base.html" %}{% block content %}<div style="display:flex;justify-content:space-between;align-items:center"><div><h1>User and timekeeper management</h1><p>Create, edit rates and safely remove users.</p></div><a href="{{url_for('master_v4')}}">Back to Data management</a></div><section class="card"><h2>Create user / timekeeper</h2><form method="post" action="{{url_for('create_user_v8')}}"><div class="grid"><label>Display name<input name="display_name" required></label><label>Email<input type="email" name="email" required></label><label>Temporary password<input type="password" name="password" minlength="10" required></label><label>System role<select name="system_role"><option>Timekeeper</option><option>Administrator</option></select></label><label>Hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="0"></label><label>Active<select name="active"><option value="1">Yes</option><option value="0">No</option></select></label></div><button>Create user</button></form></section><section class="card wide"><h2>Existing users</h2><table><tr><th>Name</th><th>Email</th><th>Role</th><th>Hourly rate</th><th>Active</th><th>Actions</th></tr>{% for u in users %}<tr><td>{{u.display_name}}</td><td>{{u.email}}</td><td>{{u.system_role}}</td><td><form method="post" action="{{url_for('admin_user_rate_v8',user_id=u.id)}}"><input type="number" min="0" step="0.01" name="hourly_rate" value="{{u.default_hourly_rate or 0}}"><button>Save rate</button></form></td><td>{{'Yes' if u.active else 'No'}}</td><td>{% if u.id != session.get('uid') %}<form method="post" action="{{url_for('remove_user_v8',user_id=u.id)}}" onsubmit="return confirm('Remove or deactivate this user?');"><button class="danger">Remove</button></form>{% else %}Current account{% endif %}</td></tr>{% endfor %}</table></section>{% endblock %}'''
+
+@app.get('/admin/users-v8')
+@login_required
+@admin_required
+def users_v8():return render_template_string(USER_ADMIN_V8,users=User.query.order_by(User.display_name).all())
+
+@app.post('/admin/users-v8/create')
+@login_required
+@admin_required
+def create_user_v8():
+    email=request.form['email'].strip().lower()
+    if User.query.filter(db.func.lower(User.email)==email).first():flash('A user with this email already exists.');return redirect(url_for('users_v8'))
+    user=User(email=email,display_name=request.form['display_name'].strip(),password_hash=generate_password_hash(request.form['password']),system_role=request.form.get('system_role') or 'Timekeeper',active=request.form.get('active')=='1',default_hourly_rate=max(0,fnum(request.form.get('hourly_rate'),0)))
+    db.session.add(user);db.session.commit();flash('User created.');return redirect(url_for('users_v8'))
+
+@app.post('/admin/users-v8/<int:user_id>/rate')
+@login_required
+@admin_required
+def admin_user_rate_v8(user_id):
+    user=db.session.get(User,user_id);user.default_hourly_rate=max(0,fnum(request.form.get('hourly_rate'),0));db.session.commit();flash('Hourly rate updated.');return redirect(url_for('users_v8'))
+
+@app.post('/admin/users-v8/<int:user_id>/remove')
+@login_required
+@admin_required
+def remove_user_v8(user_id):
+    user=db.session.get(User,user_id)
+    if not user:flash('User not found.');return redirect(url_for('users_v8'))
+    if user.id==session['uid']:flash('You cannot remove the account currently in use.');return redirect(url_for('users_v8'))
+    if Timer.query.filter_by(user_id=user.id).first():
+        user.active=False;db.session.commit();flash('The user has historical time records, so the account was deactivated rather than deleted.')
+    else:
+        EntityFactSheet.query.filter_by(entity_type='timekeeper',entity_id=user.id).delete();db.session.delete(user);db.session.commit();flash('User removed.')
+    return redirect(url_for('users_v8'))
+
+# Strengthen contact-to-client linking for new and existing contacts with a dedicated mapping page.
+CONTACT_LINKS_V8=r'''{% extends "base.html" %}{% block content %}<h1>Link contacts to clients</h1><p>Update the client linked to any existing contact.</p><section class="card wide"><table><tr><th>Contact</th><th>Email</th><th>Linked client</th><th></th></tr>{% for x in contacts %}<tr><form method="post" action="{{url_for('link_contact_client_v8',contact_id=x.id)}}"><td>{{x.display_name}}</td><td>{{x.email}}</td><td><select name="client_id"><option value="">No client</option>{% for c in clients %}<option value="{{c.id}}" {% if x.client_id==c.id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></td><td><button>Save link</button></td></form></tr>{% endfor %}</table></section>{% endblock %}'''
+
+@app.get('/admin/contact-links-v8')
+@login_required
+@admin_required
+def contact_links_v8():return render_template_string(CONTACT_LINKS_V8,contacts=Contact.query.order_by(Contact.display_name).all(),clients=Client.query.order_by(Client.name).all())
+
+@app.post('/admin/contact-links-v8/<int:contact_id>')
+@login_required
+@admin_required
+def link_contact_client_v8(contact_id):
+    contact=db.session.get(Contact,contact_id);contact.client_id=int(request.form['client_id']) if request.form.get('client_id') else None;db.session.commit();flash('Contact-client link updated.');return redirect(url_for('contact_links_v8'))
+
+# Add direct access cards without removing any existing Data Management forms.
+FACTS_V8=FACTS_V7.replace('<p>Complete Client, Contact, Matter and Timekeeper Records.</p>','<p>Complete Client, Contact, Matter and Timekeeper Records.</p><div class="cards"><section class="card"><h2>Users and timekeepers</h2><a href="{{url_for(\'users_v8\')}}">Create, remove and manage rates</a></section><section class="card"><h2>Contact-client links</h2><a href="{{url_for(\'contact_links_v8\')}}">Manage existing links</a></section></div>')
+def facts_v8():return render_template_string(FACTS_V8,clients=Client.query.order_by(Client.name).all(),contacts=Contact.query.order_by(Contact.display_name).all(),matters=Matter.query.order_by(Matter.name).all(),users=User.query.order_by(User.display_name).all())
+app.view_functions['master_v4']=login_required(admin_required(facts_v8))
+
