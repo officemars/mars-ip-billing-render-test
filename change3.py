@@ -1267,3 +1267,194 @@ def update_recent_entry_v101(timer_id):
 app.view_functions['timer'] = login_required(timer_v101)
 app.view_functions['update_recent_entry_v10'] = login_required(update_recent_entry_v101)
 
+
+# ==================== CHANGE 3.11: CLIENT-SPECIFIC RATES AND LINKING UI ====================
+# Append this block after Change 3.10.1.
+
+
+class UserClientRateV11(db.Model):
+    __tablename__ = 'user_client_rate_v11'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False, index=True)
+    hourly_rate = db.Column(db.Float, nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'client_id', name='uq_user_client_rate_v11'),
+    )
+
+
+with app.app_context():
+    db.create_all()
+
+
+def effective_rate_v11(user, client, matter):
+    """Matter rate, then user/client rate, then user's standard rate."""
+    if matter.matter_hourly_rate is not None:
+        return float(matter.matter_hourly_rate)
+    special = UserClientRateV11.query.filter_by(
+        user_id=user.id, client_id=client.id
+    ).first()
+    if special is not None:
+        return float(special.hourly_rate)
+    return float(user.default_hourly_rate or 0)
+
+
+# Remove only the explanatory sentence requested by the user.
+TIMER_PAGE_V11 = TIMER_PAGE_V101.replace(
+    '<p>If Custom date is empty, Start timer records the current system time. If a date and duration are entered, a completed entry is created immediately.</p>',
+    ''
+)
+
+
+def timer_v11():
+    active = Timer.query.filter(
+        Timer.user_id == session['uid'], Timer.status.in_(['Running', 'Paused'])
+    ).order_by(Timer.id.desc()).all()
+    for entry in active:
+        entry.seconds = elapsed_safe(entry)
+    recent_query = (
+        Timer.query.filter_by(status='Stopped')
+        if session.get('role') == 'Administrator'
+        else Timer.query.filter_by(user_id=session['uid'], status='Stopped')
+    )
+    recent = recent_query.order_by(Timer.id.desc()).limit(50).all()
+    return render_template_string(
+        TIMER_PAGE_V11,
+        clients=Client.query.order_by(Client.name).all(),
+        active=active,
+        recent=recent,
+    )
+
+
+def start_timer_v11():
+    user = db.session.get(User, session['uid'])
+    client = db.session.get(Client, int(request.form['client_id']))
+    matter = db.session.get(Matter, int(request.form['matter_id']))
+    rate = effective_rate_v11(user, client, matter)
+    custom_date = _v10_date(request.form.get('custom_date'))
+    duration_text = (request.form.get('duration_hours') or '').strip()
+    is_billable = matter.billable and request.form.get('billable') == '1'
+
+    special = UserClientRateV11.query.filter_by(
+        user_id=user.id, client_id=client.id
+    ).first()
+    client_snapshot_rate = special.hourly_rate if special else None
+
+    if custom_date:
+        duration = fnum(duration_text, None)
+        if duration is None or duration <= 0:
+            flash('Enter a duration greater than zero for a custom-date entry.')
+            return redirect(url_for('timer'))
+        entry = Timer(
+            user_id=user.id, client_id=client.id, matter_id=matter.id, category=None,
+            services='', notes=request.form.get('notes', ''), start_time=custom_date,
+            stop_time=custom_date + timedelta(hours=duration), status='Stopped', paused_seconds=0,
+            timekeeper_rate=user.default_hourly_rate, client_rate=client_snapshot_rate,
+            matter_rate=matter.matter_hourly_rate, applied_rate=rate,
+            billable=is_billable, worked_hours=round(duration, 4),
+            billable_hours=round(duration, 4) if is_billable else 0,
+            amount=round(duration * rate, 2) if is_billable else 0,
+            invoiced_status='Unbilled',
+        )
+        flash('Completed dated entry saved.')
+    else:
+        entry = Timer(
+            user_id=user.id, client_id=client.id, matter_id=matter.id, category=None,
+            services='', notes=request.form.get('notes', ''), start_time=datetime.now(timezone.utc),
+            status='Running', paused_seconds=0, timekeeper_rate=user.default_hourly_rate,
+            client_rate=client_snapshot_rate, matter_rate=matter.matter_hourly_rate,
+            applied_rate=rate, billable=is_billable, invoiced_status='Unbilled',
+        )
+        flash('Timer started with the current system time.')
+    db.session.add(entry)
+    db.session.commit()
+    return redirect(url_for('timer'))
+
+
+app.view_functions['timer'] = login_required(timer_v11)
+app.view_functions['start_timer_v4'] = login_required(start_timer_v11)
+
+
+# Admin rate management: one standard rate per user and optional rates by client.
+USER_ADMIN_V11 = r'''{% extends "base.html" %}{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap"><div><h1>User and timekeeper management</h1><p>Manage user details, standard rates and optional client-specific rates.</p></div><a href="{{url_for('master_v4')}}">Back to Data management</a></div>
+<section class="card"><h2>Create user / timekeeper</h2><form method="post" action="{{url_for('create_user_v8')}}"><div class="grid"><label>Display name<input name="display_name" required></label><label>Email<input type="email" name="email" required></label><label>Temporary password<input type="password" name="password" minlength="10" required></label><label>System role<select name="system_role"><option>Timekeeper</option><option>Administrator</option></select></label><label>Standard hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="0"></label><label>Active<select name="active"><option value="1">Yes</option><option value="0">No</option></select></label></div><button>Create user</button></form></section>
+{% for u in users %}<section class="card wide"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><div><h2>{{u.display_name}}</h2><p>{{u.email}}</p></div>{% if u.id != session.get('uid') %}<form method="post" action="{{url_for('remove_user_v8',user_id=u.id)}}" onsubmit="return confirm('Remove or deactivate this user?');"><button class="danger">Remove user</button></form>{% endif %}</div>
+<form method="post" action="{{url_for('edit_user_v10',user_id=u.id)}}"><div class="grid"><label>Name<input name="display_name" value="{{u.display_name}}" required></label><label>Email<input type="email" name="email" value="{{u.email}}" required></label><label>Role<select name="system_role"><option {% if u.system_role=='Timekeeper' %}selected{% endif %}>Timekeeper</option><option {% if u.system_role=='Administrator' %}selected{% endif %}>Administrator</option></select></label><label>Standard hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="{{u.default_hourly_rate or 0}}"></label><label>Active<select name="active"><option value="1" {% if u.active %}selected{% endif %}>Yes</option><option value="0" {% if not u.active %}selected{% endif %}>No</option></select></label></div><button>Save user details</button></form>
+<h3>Client-specific hourly rates</h3><p>Leave a client blank to use the standard hourly rate. A matter-specific rate still has first priority.</p>
+<form method="post" action="{{url_for('save_client_rates_v11',user_id=u.id)}}"><div class="rate-grid">{% for c in clients %}<label><span>{{c.name}}</span><input type="number" min="0" step="0.01" name="client_rate_{{c.id}}" value="{{rate_map.get((u.id,c.id),'')}}" placeholder="Standard: {{u.default_hourly_rate or 0}}"></label>{% endfor %}</div><button>Save client-specific rates</button></form></section>{% endfor %}
+<style>.rate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.rate-grid label{display:flex;flex-direction:column;gap:5px}</style>{% endblock %}'''
+
+
+def users_v11():
+    users = User.query.order_by(User.display_name).all()
+    clients = Client.query.order_by(Client.name).all()
+    rate_map = {(row.user_id, row.client_id): row.hourly_rate for row in UserClientRateV11.query.all()}
+    return render_template_string(
+        USER_ADMIN_V11, users=users, clients=clients, rate_map=rate_map
+    )
+
+
+@app.post('/admin/users-v11/<int:user_id>/client-rates')
+@login_required
+@admin_required
+def save_client_rates_v11(user_id):
+    user = db.session.get(User, user_id)
+    if not user:
+        flash('User not found.')
+        return redirect(url_for('users_v8'))
+    for client in Client.query.all():
+        field = (request.form.get(f'client_rate_{client.id}') or '').strip()
+        row = UserClientRateV11.query.filter_by(user_id=user.id, client_id=client.id).first()
+        if not field:
+            if row:
+                db.session.delete(row)
+            continue
+        rate = fnum(field, None)
+        if rate is None or rate < 0:
+            continue
+        if row is None:
+            row = UserClientRateV11(user_id=user.id, client_id=client.id, hourly_rate=rate)
+            db.session.add(row)
+        else:
+            row.hourly_rate = rate
+    db.session.commit()
+    flash('Client-specific rates saved.')
+    return redirect(url_for('users_v8'))
+
+
+app.view_functions['users_v8'] = login_required(admin_required(users_v11))
+
+
+# Revised UI only. The existing many-to-many save function remains unchanged.
+CONTACT_LINKS_V11 = r'''{% extends "base.html" %}{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap"><div><h1>Contact-client links</h1><p>Select a contact, choose all associated clients, and save.</p></div><a href="{{url_for('master_v4')}}">Back to Data management</a></div>
+<section class="card"><div class="grid"><label>Find contact<input id="contact-search" type="search" placeholder="Search by name or email"></label><label>Select contact<select id="contact-picker"><option value="">Choose a contact</option>{% for x in contacts %}<option value="{{x.id}}" data-search="{{(x.display_name ~ ' ' ~ (x.email or ''))|lower}}">{{x.display_name}}{% if x.email %} | {{x.email}}{% endif %}</option>{% endfor %}</select></label></div></section>
+{% for x in contacts %}<section class="card contact-panel" id="contact-panel-{{x.id}}" hidden><div class="contact-heading"><div><h2>{{x.display_name}}</h2><p>{{x.email or 'No email address'}}</p></div><span class="link-count" data-contact="{{x.id}}"></span></div><form method="post" action="{{url_for('link_contact_clients_v10',contact_id=x.id)}}"><div class="toolbar"><button type="button" class="secondary select-all">Select all</button><button type="button" class="secondary clear-all">Clear all</button><input class="client-search" type="search" placeholder="Filter clients"></div><div class="client-link-grid">{% for c in clients %}<label class="client-link-card" data-name="{{c.name|lower}}"><input type="checkbox" name="client_ids" value="{{c.id}}" {% if c.id in links.get(x.id,[]) %}checked{% endif %}><span>{{c.name}}</span></label>{% endfor %}</div><div class="sticky-actions"><button>Save links for {{x.display_name}}</button></div></form></section>{% endfor %}
+<style>.contact-heading,.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.client-link-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:16px 0}.client-link-card{display:flex;align-items:center;gap:10px;border:1px solid #d8dee8;border-radius:10px;padding:12px;background:#fff;cursor:pointer}.client-link-card:has(input:checked){border-color:#2563eb;background:#eff6ff}.client-link-card input{width:auto}.toolbar .client-search{min-width:260px;flex:1}.sticky-actions{position:sticky;bottom:0;background:rgba(255,255,255,.96);padding:12px 0}.link-count{font-weight:600}</style>
+<script>
+const picker=document.getElementById('contact-picker'),contactSearch=document.getElementById('contact-search');
+function showContact(){document.querySelectorAll('.contact-panel').forEach(p=>p.hidden=true);if(picker.value){const p=document.getElementById('contact-panel-'+picker.value);p.hidden=false;updateCount(p);}}
+picker.addEventListener('change',showContact);contactSearch.addEventListener('input',()=>{const q=contactSearch.value.toLowerCase();[...picker.options].forEach((o,i)=>{if(i)o.hidden=!o.dataset.search.includes(q);});});
+document.querySelectorAll('.contact-panel').forEach(panel=>{const boxes=[...panel.querySelectorAll('input[name="client_ids"]')],search=panel.querySelector('.client-search');panel.querySelector('.select-all').onclick=()=>{boxes.filter(b=>!b.closest('.client-link-card').hidden).forEach(b=>b.checked=true);updateCount(panel)};panel.querySelector('.clear-all').onclick=()=>{boxes.forEach(b=>b.checked=false);updateCount(panel)};boxes.forEach(b=>b.addEventListener('change',()=>updateCount(panel)));search.addEventListener('input',()=>{const q=search.value.toLowerCase();panel.querySelectorAll('.client-link-card').forEach(card=>card.hidden=!card.dataset.name.includes(q));});});
+function updateCount(panel){const n=panel.querySelectorAll('input[name="client_ids"]:checked').length;panel.querySelector('.link-count').textContent=n+' client'+(n===1?'':'s')+' selected';}
+</script>{% endblock %}'''
+
+
+def contact_links_v11():
+    links = {}
+    for row in ContactClientLinkV10.query.all():
+        links.setdefault(row.contact_id, []).append(row.client_id)
+    for contact in Contact.query.filter(Contact.client_id.isnot(None)).all():
+        links.setdefault(contact.id, [])
+        if contact.client_id not in links[contact.id]:
+            links[contact.id].append(contact.client_id)
+    return render_template_string(
+        CONTACT_LINKS_V11,
+        contacts=Contact.query.order_by(Contact.display_name).all(),
+        clients=Client.query.order_by(Client.name).all(),
+        links=links,
+    )
+
+
+app.view_functions['contact_links_v8'] = login_required(admin_required(contact_links_v11))
