@@ -662,3 +662,210 @@ def stop_timer_v81(timer_id):
     return redirect(url_for('timer'))
 
 app.view_functions['stop_timer'] = login_required(stop_timer_v81)
+
+
+# ==================== CHANGE 3.9: CUSTOM STOP, EDITABLE ENTRY TIMES, WIDER SERVICES ====================
+# Append this block after the existing Change 3.8 code.
+# It keeps system start/stop as the default and adds optional custom timestamps.
+
+
+def _v39_datetime(value, fallback=None):
+    """Parse a datetime-local value as UTC, or return the supplied fallback."""
+    value = (value or '').strip()
+    if not value:
+        return fallback
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _v39_input_datetime(value):
+    if not value:
+        return ''
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.strftime('%Y-%m-%dT%H:%M')
+
+
+# Build the final timer page directly from the proven V7 page so prior V8 replacements
+# cannot prevent the custom-stop control or recent-entry editing from appearing.
+TIMER_PAGE_V39 = TIMER_PAGE_V7.replace(
+    '<label>Billable<select name="billable"><option value="1">Yes</option><option value="0">No</option></select></label></div>',
+    '<label>Billable<select name="billable"><option value="1">Yes</option><option value="0">No</option></select></label>'
+    '<label>Custom start date and time, optional<input type="datetime-local" name="custom_start"></label></div>'
+).replace(
+    '<button>Start timer now</button>',
+    '<button>Start timer</button>'
+).replace(
+    '<label>Billable hours override, optional<input type="number" min="0" step="0.0001" name="billable_hours"></label>'
+    '<input type="hidden" name="notes"',
+    '<label>Custom stop date and time, optional<input type="datetime-local" name="custom_stop"></label>'
+    '<label>Billable hours override, optional<input type="number" min="0" step="0.0001" name="billable_hours"></label>'
+    '<input type="hidden" name="notes"'
+).replace(
+    '<th>Date</th><th>Client</th><th>Matter</th><th>Service</th>',
+    '<th>Start date/time</th><th>Stop date/time</th><th>Client</th><th>Matter</th><th class="service-column">Service description</th>'
+).replace(
+    '<form method="post" action="{{url_for(\'edit_service_v4\',timer_id=t.id)}}"><td>{{t.start_time.date()}}</td><td>{{t.client.name}}</td><td>{{t.matter.name}}</td><td><textarea name="services">{{t.services}}</textarea><input type="hidden" name="notes" value="{{t.notes or \'\'}}"></td>',
+    '<form method="post" action="{{url_for(\'edit_time_entry_v39\',timer_id=t.id)}}">'
+    '<td><input type="datetime-local" name="start_time" value="{{format_dt_v39(t.start_time)}}" required></td>'
+    '<td><input type="datetime-local" name="stop_time" value="{{format_dt_v39(t.stop_time)}}" required></td>'
+    '<td>{{t.client.name}}</td><td>{{t.matter.name}}</td>'
+    '<td class="service-column"><textarea class="service-description" name="services" required>{{t.services}}</textarea>'
+    '<input type="hidden" name="notes" value="{{t.notes or \'\'}}"></td>'
+).replace(
+    '<button>Save</button>',
+    '<button>Save entry</button>'
+)
+
+
+def timer_v39():
+    active = Timer.query.filter(
+        Timer.user_id == session['uid'],
+        Timer.status.in_(['Running', 'Paused'])
+    ).order_by(Timer.id.desc()).all()
+    for entry in active:
+        entry.seconds = elapsed_safe(entry)
+    recent = Timer.query.filter_by(
+        user_id=session['uid'], status='Stopped'
+    ).order_by(Timer.id.desc()).limit(30).all()
+    return render_template_string(
+        TIMER_PAGE_V39,
+        clients=Client.query.order_by(Client.name).all(),
+        active=active,
+        recent=recent,
+        format_dt_v39=_v39_input_datetime,
+    )
+
+
+def start_timer_v39():
+    user = db.session.get(User, session['uid'])
+    client = db.session.get(Client, int(request.form['client_id']))
+    matter = db.session.get(Matter, int(request.form['matter_id']))
+    rate = (
+        matter.matter_hourly_rate
+        if matter.matter_hourly_rate is not None
+        else client.client_hourly_rate
+        if client.client_hourly_rate is not None
+        else user.default_hourly_rate
+    )
+    start_at = _v39_datetime(request.form.get('custom_start'), datetime.now(timezone.utc))
+    entry = Timer(
+        user_id=user.id,
+        client_id=client.id,
+        matter_id=matter.id,
+        category=None,
+        services=request.form['services'].strip(),
+        notes=request.form.get('notes', ''),
+        start_time=start_at,
+        status='Running',
+        paused_seconds=0,
+        timekeeper_rate=user.default_hourly_rate,
+        client_rate=client.client_hourly_rate,
+        matter_rate=matter.matter_hourly_rate,
+        applied_rate=rate or 0,
+        billable=matter.billable and request.form.get('billable') == '1',
+        invoiced_status='Unbilled',
+    )
+    db.session.add(entry)
+    db.session.commit()
+    flash('Timer started.')
+    return redirect(url_for('timer'))
+
+
+# Capture the current stop implementation. It remains the default when custom_stop is blank.
+_stop_timer_before_v39 = app.view_functions['stop_timer']
+
+
+def stop_timer_v39(timer_id):
+    custom_stop = (request.form.get('custom_stop') or '').strip()
+    if not custom_stop:
+        return _stop_timer_before_v39(timer_id)
+
+    entry = Timer.query.filter_by(id=timer_id, user_id=session['uid']).first_or_404()
+    stop_at = _v39_datetime(custom_stop)
+    start_at = entry.start_time
+    if start_at and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    if not start_at or not stop_at or stop_at < start_at:
+        flash('The custom stop date and time must be after the start date and time.')
+        return redirect(url_for('timer'))
+
+    worked = max(
+        0.0,
+        ((stop_at - start_at).total_seconds() - float(entry.paused_seconds or 0)) / 3600,
+    )
+    override = (request.form.get('billable_hours') or '').strip()
+    entry.stop_time = stop_at
+    entry.status = 'Stopped'
+    entry.worked_hours = round(worked, 4)
+    entry.billable_hours = (
+        max(0.0, fnum(override, worked)) if entry.billable else 0
+    )
+    entry.amount = round(
+        float(entry.billable_hours or 0) * float(entry.applied_rate or 0), 2
+    )
+    if request.form.get('notes') is not None:
+        entry.notes = request.form.get('notes', '')
+    db.session.commit()
+    flash('Time entry saved with the selected stop date and time.')
+    return redirect(url_for('timer'))
+
+
+@app.post('/timer/<int:timer_id>/edit-times-v39')
+@login_required
+def edit_time_entry_v39(timer_id):
+    query = (
+        Timer.query.filter_by(id=timer_id, user_id=session['uid'])
+        if session.get('role') != 'Administrator'
+        else Timer.query.filter_by(id=timer_id)
+    )
+    entry = query.first_or_404()
+    start_at = _v39_datetime(request.form.get('start_time'))
+    stop_at = _v39_datetime(request.form.get('stop_time'))
+    if not start_at or not stop_at or stop_at < start_at:
+        flash('The stop date and time must be after the start date and time.')
+        return redirect(request.referrer or url_for('timer'))
+
+    worked = max(
+        0.0,
+        ((stop_at - start_at).total_seconds() - float(entry.paused_seconds or 0)) / 3600,
+    )
+    entry.start_time = start_at
+    entry.stop_time = stop_at
+    entry.worked_hours = round(worked, 4)
+    entry.billable_hours = round(worked, 4) if entry.billable else 0
+    entry.amount = round(
+        float(entry.billable_hours or 0) * float(entry.applied_rate or 0), 2
+    )
+    entry.services = request.form.get('services', entry.services).strip()
+    entry.notes = request.form.get('notes', entry.notes)
+    db.session.commit()
+    flash('Time entry date, time and service description updated.')
+    return redirect(request.referrer or url_for('timer'))
+
+
+app.view_functions['timer'] = login_required(timer_v39)
+app.view_functions['start_timer_v4'] = login_required(start_timer_v39)
+app.view_functions['stop_timer'] = login_required(stop_timer_v39)
+
+
+# Make service-description fields wider throughout HTML pages without changing every template.
+@app.after_request
+def widen_service_descriptions_v39(response):
+    content_type = response.headers.get('Content-Type', '')
+    if response.status_code == 200 and 'text/html' in content_type:
+        html = response.get_data(as_text=True)
+        css = '''<style id="marsip-service-width-v39">
+textarea[name="services"], textarea[name="description"],
+.service-description { width:100% !important; min-width:420px; min-height:90px; box-sizing:border-box; }
+th.service-column, td.service-column { min-width:440px !important; width:45% !important; }
+table { width:100%; }
+</style>'''
+        if 'marsip-service-width-v39' not in html:
+            html = html.replace('</head>', css + '</head>') if '</head>' in html else css + html
+            response.set_data(html)
+            response.headers['Content-Length'] = len(response.get_data())
+    return response
+
