@@ -1204,3 +1204,66 @@ def link_contact_clients_v10(contact_id):
 
 app.view_functions['contact_links_v8'] = login_required(admin_required(contact_links_v10))
 
+# ==================== CHANGE 3.10.1: RECENT ENTRY SERVICE DESCRIPTION FIX ====================
+# Append this block after Change 3.10.
+# It changes only the Recent entries table and its save handler.
+
+TIMER_PAGE_V101 = TIMER_PAGE_V10.replace(
+    '<th>Hours</th><th>Override billable hours</th>',
+    '<th class="service-column">Service description</th><th>Hours</th><th>Override billable hours</th>'
+).replace(
+    '<td>{{t.client.name}}</td><td>{{t.matter.name}}</td><td>{{t.worked_hours}}</td><td><input type="number" min="0" step="0.0001" name="billable_hours" value="{{t.billable_hours or 0}}"></td>',
+    '<td>{{t.client.name}}</td><td>{{t.matter.name}}</td>'
+    '<td class="service-column"><textarea class="service-description" name="services">{{t.services or \'\'}}</textarea></td>'
+    '<td>{{t.worked_hours}}</td><td><input type="number" min="0" step="0.0001" name="billable_hours" value="{{t.billable_hours or 0}}"></td>'
+)
+
+
+def timer_v101():
+    active = Timer.query.filter(
+        Timer.user_id == session['uid'], Timer.status.in_(['Running', 'Paused'])
+    ).order_by(Timer.id.desc()).all()
+    for entry in active:
+        entry.seconds = elapsed_safe(entry)
+    recent_query = (
+        Timer.query.filter_by(status='Stopped')
+        if session.get('role') == 'Administrator'
+        else Timer.query.filter_by(user_id=session['uid'], status='Stopped')
+    )
+    recent = recent_query.order_by(Timer.id.desc()).limit(50).all()
+    return render_template_string(
+        TIMER_PAGE_V101,
+        clients=Client.query.order_by(Client.name).all(),
+        active=active,
+        recent=recent,
+    )
+
+
+def update_recent_entry_v101(timer_id):
+    query = (
+        Timer.query.filter_by(id=timer_id)
+        if session.get('role') == 'Administrator'
+        else Timer.query.filter_by(id=timer_id, user_id=session['uid'])
+    )
+    entry = query.first_or_404()
+    new_date = _v10_date(request.form.get('entry_date'))
+    if new_date:
+        duration = float(entry.worked_hours or 0)
+        entry.start_time = new_date
+        entry.stop_time = new_date + timedelta(hours=duration)
+    entry.services = request.form.get('services', entry.services or '').strip()
+    entry.billable_hours = (
+        max(0, fnum(request.form.get('billable_hours'), entry.billable_hours or 0))
+        if entry.billable else 0
+    )
+    entry.amount = round(
+        float(entry.billable_hours or 0) * float(entry.applied_rate or 0), 2
+    )
+    db.session.commit()
+    flash('Recent entry, service description and billable hours updated.')
+    return redirect(url_for('timer'))
+
+
+app.view_functions['timer'] = login_required(timer_v101)
+app.view_functions['update_recent_entry_v10'] = login_required(update_recent_entry_v101)
+
