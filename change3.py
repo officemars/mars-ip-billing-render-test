@@ -869,3 +869,338 @@ table { width:100%; }
             response.headers['Content-Length'] = len(response.get_data())
     return response
 
+# ==================== CHANGE 3.10: DURATION ENTRY, ADMIN DELETE, AUTOFILL, MULTI-LINKS ====================
+# Append this block after Change 3.9 in the existing change3.py.
+# Existing invoice, login, data, and user-management behavior is preserved.
+
+
+class ContactClientLinkV10(db.Model):
+    __tablename__ = 'contact_client_link_v10'
+    id = db.Column(db.Integer, primary_key=True)
+    contact_id = db.Column(db.Integer, db.ForeignKey('contact.id'), nullable=False, index=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False, index=True)
+    __table_args__ = (
+        db.UniqueConstraint('contact_id', 'client_id', name='uq_contact_client_v10'),
+    )
+
+
+with app.app_context():
+    db.create_all()
+    # Preserve every existing single contact-to-client relationship in the new multi-link table.
+    for _contact in Contact.query.filter(Contact.client_id.isnot(None)).all():
+        if not ContactClientLinkV10.query.filter_by(
+            contact_id=_contact.id, client_id=_contact.client_id
+        ).first():
+            db.session.add(ContactClientLinkV10(
+                contact_id=_contact.id, client_id=_contact.client_id
+            ))
+    db.session.commit()
+
+
+def _v10_date(value):
+    value = (value or '').strip()
+    if not value:
+        return None
+    return datetime.strptime(value, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+
+
+def _v10_json_fact(kind, entity_id):
+    return fact_data(kind, entity_id) if entity_id else {}
+
+
+def _v10_client_payload(client):
+    extra = _v10_json_fact('client', client.id)
+    return {
+        'id': client.id,
+        'name': client.name or '',
+        'billing_name': client.billing_name or '',
+        'address': client.address or '',
+        'country': client.country or '',
+        'vat_number': client.vat_number or '',
+        'language': client.language or 'English',
+        'currency': client.currency or 'EUR',
+        'rate': client.client_hourly_rate if client.client_hourly_rate is not None else '',
+        'payment_terms': extra.get('payment_terms') or '',
+        'vat_treatment': extra.get('vat_treatment') or '',
+        'billing_email': extra.get('billing_email') or '',
+    }
+
+
+def _v10_contact_payload(contact):
+    extra = _v10_json_fact('contact', contact.id)
+    linked = [row.client_id for row in ContactClientLinkV10.query.filter_by(contact_id=contact.id).all()]
+    if contact.client_id and contact.client_id not in linked:
+        linked.append(contact.client_id)
+    return {
+        'id': contact.id,
+        'name': contact.display_name or '',
+        'email': contact.email or '',
+        'phone': contact.phone or '',
+        'title': extra.get('title') or '',
+        'salutation': extra.get('salutation') or 'Vous',
+        'preferred_language': extra.get('preferred_language') or '',
+        'address': extra.get('address') or '',
+        'client_ids': linked,
+    }
+
+
+def _v10_matter_payload(matter):
+    extra = _v10_json_fact('matter', matter.id)
+    return {
+        'id': matter.id,
+        'name': matter.name or '',
+        'reference': matter.reference or '',
+        'nature': extra.get('nature') or '',
+        'client_id': matter.client_id,
+        'contact_id': matter.primary_contact_id or '',
+        'billing_method': extra.get('billing_method') or '',
+        'hourly_rate': matter.matter_hourly_rate if matter.matter_hourly_rate is not None else '',
+        'daily_rate': extra.get('daily_rate') if extra.get('daily_rate') is not None else '',
+        'currency': extra.get('currency') or 'EUR',
+        'payment_terms': extra.get('payment_terms') or '',
+        'billing_notes': extra.get('billing_notes') or '',
+    }
+
+
+# New time-entry screen:
+# - no service description in the entry-creation section;
+# - no custom time fields;
+# - optional custom date plus duration immediately creates a stopped entry;
+# - without custom date, Start timer uses system time;
+# - service description remains in Active entries;
+# - billable-hours override is editable in Active and Recent entries;
+# - administrators can delete Recent entries.
+TIMER_PAGE_V10 = r'''{% extends "base.html" %}{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+  <div><h1>Time recording</h1><p>Start a live timer, or enter a date and duration to create a completed entry.</p></div>
+  <a href="{{url_for('password_v4')}}">Change password</a>
+</div>
+<section class="card"><h2>New time entry</h2><form method="post" action="{{url_for('start_timer_v4')}}">
+<div class="grid">
+<label>Client<select id="client" name="client_id" required><option value="">Select</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label>
+<label>Matter<select id="matter" name="matter_id" required><option value="">Select a client first</option></select></label>
+<label>Billable<select name="billable"><option value="1">Yes</option><option value="0">No</option></select></label>
+<label>Custom date, optional<input type="date" name="custom_date"></label>
+<label>Duration in hours<input type="number" min="0.0001" step="0.0001" name="duration_hours" placeholder="Required when a custom date is selected"></label>
+</div>
+<label>Internal notes<input name="notes"></label>
+<p>If Custom date is empty, Start timer records the current system time. If a date and duration are entered, a completed entry is created immediately.</p>
+<button>Start timer / save dated duration</button></form></section>
+<h2>Active entries</h2><div class="cards">{% for t in active %}<section class="card"><h3>{{t.client.name}}</h3><p>{{t.matter.name}}</p>
+<form method="post" action="{{url_for('edit_service_v4',timer_id=t.id)}}"><label>Service description<textarea class="service-description" name="services" required>{{t.services or ''}}</textarea></label><label>Notes<input name="notes" value="{{t.notes or ''}}"></label><button>Save description</button></form>
+<div class="clock" data-s="{{t.seconds}}" data-run="{{1 if t.status=='Running' else 0}}"></div><p>{{t.status}}</p>
+{% if t.status=='Running' %}<form method="post" action="{{url_for('pause_timer',timer_id=t.id)}}"><button>Pause</button></form>{% else %}<form method="post" action="{{url_for('resume_timer',timer_id=t.id)}}"><button>Resume</button></form>{% endif %}
+<form method="post" action="{{url_for('stop_timer',timer_id=t.id)}}"><label>Override billable hours, optional<input type="number" min="0" step="0.0001" name="billable_hours"></label><input type="hidden" name="notes" value="{{t.notes or ''}}"><button class="danger">Stop and save</button></form></section>{% else %}<section class="card">No active entries.</section>{% endfor %}</div>
+<section class="card wide"><h2>Recent entries</h2><table><tr><th>Date</th><th>Client</th><th>Matter</th><th>Hours</th><th>Override billable hours</th><th>Rate</th><th>Amount</th><th>Actions</th></tr>
+{% for t in recent %}<tr><form method="post" action="{{url_for('update_recent_entry_v10',timer_id=t.id)}}"><td><input type="date" name="entry_date" value="{{t.start_time.strftime('%Y-%m-%d')}}" required></td><td>{{t.client.name}}</td><td>{{t.matter.name}}</td><td>{{t.worked_hours}}</td><td><input type="number" min="0" step="0.0001" name="billable_hours" value="{{t.billable_hours or 0}}"></td><td>{{t.applied_rate}}</td><td>{{t.amount}}</td><td><button>Save entry</button></form>{% if session.get('role')=='Administrator' %}<form method="post" action="{{url_for('delete_time_entry_v10',timer_id=t.id)}}" onsubmit="return confirm('Delete this time entry permanently?');"><button class="danger">Delete</button></form>{% endif %}</td></tr>{% endfor %}
+</table></section>
+<script>
+const client=document.getElementById('client'),matter=document.getElementById('matter');
+client.addEventListener('change',async()=>{matter.innerHTML='<option value="">Loading...</option>';if(!client.value){matter.innerHTML='<option value="">Select a client first</option>';return;}const r=await fetch('/api/matters/'+client.value),d=await r.json();matter.innerHTML='<option value="">Select a matter</option>'+d.map(x=>`<option value="${x.id}">${x.reference||''}${x.reference?' | ':''}${x.name}</option>`).join('');});
+document.querySelectorAll('.clock').forEach(e=>{let s=Number(e.dataset.s||0);const draw=()=>{e.textContent=[Math.floor(s/3600),Math.floor((s%3600)/60),Math.floor(s%60)].map(x=>String(x).padStart(2,'0')).join(':');if(e.dataset.run==='1')s+=1;};draw();setInterval(draw,1000);});
+</script>{% endblock %}'''
+
+
+def timer_v10():
+    active = Timer.query.filter(
+        Timer.user_id == session['uid'], Timer.status.in_(['Running', 'Paused'])
+    ).order_by(Timer.id.desc()).all()
+    for entry in active:
+        entry.seconds = elapsed_safe(entry)
+    recent_query = Timer.query.filter_by(status='Stopped') if session.get('role') == 'Administrator' else Timer.query.filter_by(user_id=session['uid'], status='Stopped')
+    recent = recent_query.order_by(Timer.id.desc()).limit(50).all()
+    return render_template_string(
+        TIMER_PAGE_V10,
+        clients=Client.query.order_by(Client.name).all(),
+        active=active,
+        recent=recent,
+    )
+
+
+def start_timer_v10():
+    user = db.session.get(User, session['uid'])
+    client = db.session.get(Client, int(request.form['client_id']))
+    matter = db.session.get(Matter, int(request.form['matter_id']))
+    rate = matter.matter_hourly_rate if matter.matter_hourly_rate is not None else client.client_hourly_rate if client.client_hourly_rate is not None else user.default_hourly_rate
+    custom_date = _v10_date(request.form.get('custom_date'))
+    duration_text = (request.form.get('duration_hours') or '').strip()
+    is_billable = matter.billable and request.form.get('billable') == '1'
+    if custom_date:
+        duration = fnum(duration_text, None)
+        if duration is None or duration <= 0:
+            flash('Enter a duration greater than zero for a custom-date entry.')
+            return redirect(url_for('timer'))
+        stop_at = custom_date + timedelta(hours=duration)
+        entry = Timer(
+            user_id=user.id, client_id=client.id, matter_id=matter.id, category=None,
+            services='', notes=request.form.get('notes', ''), start_time=custom_date,
+            stop_time=stop_at, status='Stopped', paused_seconds=0,
+            timekeeper_rate=user.default_hourly_rate, client_rate=client.client_hourly_rate,
+            matter_rate=matter.matter_hourly_rate, applied_rate=rate or 0,
+            billable=is_billable, worked_hours=round(duration, 4),
+            billable_hours=round(duration, 4) if is_billable else 0,
+            amount=round(duration * float(rate or 0), 2) if is_billable else 0,
+            invoiced_status='Unbilled',
+        )
+        flash('Completed dated entry saved. Add the service description from Active entries only when using a live timer.')
+    else:
+        entry = Timer(
+            user_id=user.id, client_id=client.id, matter_id=matter.id, category=None,
+            services='', notes=request.form.get('notes', ''), start_time=datetime.now(timezone.utc),
+            status='Running', paused_seconds=0, timekeeper_rate=user.default_hourly_rate,
+            client_rate=client.client_hourly_rate, matter_rate=matter.matter_hourly_rate,
+            applied_rate=rate or 0, billable=is_billable, invoiced_status='Unbilled',
+        )
+        flash('Timer started with the current system time.')
+    db.session.add(entry)
+    db.session.commit()
+    return redirect(url_for('timer'))
+
+
+@app.post('/timer/<int:timer_id>/recent-v10')
+@login_required
+def update_recent_entry_v10(timer_id):
+    query = Timer.query.filter_by(id=timer_id) if session.get('role') == 'Administrator' else Timer.query.filter_by(id=timer_id, user_id=session['uid'])
+    entry = query.first_or_404()
+    new_date = _v10_date(request.form.get('entry_date'))
+    if new_date:
+        duration = float(entry.worked_hours or 0)
+        entry.start_time = new_date
+        entry.stop_time = new_date + timedelta(hours=duration)
+    entry.billable_hours = max(0, fnum(request.form.get('billable_hours'), entry.billable_hours or 0)) if entry.billable else 0
+    entry.amount = round(float(entry.billable_hours or 0) * float(entry.applied_rate or 0), 2)
+    db.session.commit()
+    flash('Recent entry updated.')
+    return redirect(url_for('timer'))
+
+
+@app.post('/admin/time-entry/<int:timer_id>/delete-v10')
+@login_required
+@admin_required
+def delete_time_entry_v10(timer_id):
+    entry = Timer.query.filter_by(id=timer_id).first_or_404()
+    if entry.invoiced_status == 'Invoiced' or entry.invoice_number:
+        flash('This entry is already invoiced and cannot be deleted.')
+    else:
+        db.session.delete(entry)
+        db.session.commit()
+        flash('Time entry deleted.')
+    return redirect(request.referrer or url_for('timer'))
+
+
+app.view_functions['timer'] = login_required(timer_v10)
+app.view_functions['start_timer_v4'] = login_required(start_timer_v10)
+
+
+# User management with editable name, email, role, active status and rate.
+USER_ADMIN_V10 = r'''{% extends "base.html" %}{% block content %}<h1>User and timekeeper management</h1><p><a href="{{url_for('master_v4')}}">Back to Data management</a></p>
+<section class="card"><h2>Create user / timekeeper</h2><form method="post" action="{{url_for('create_user_v8')}}"><div class="grid"><label>Display name<input name="display_name" required></label><label>Email<input type="email" name="email" required></label><label>Temporary password<input type="password" name="password" minlength="10" required></label><label>System role<select name="system_role"><option>Timekeeper</option><option>Administrator</option></select></label><label>Hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="0"></label><label>Active<select name="active"><option value="1">Yes</option><option value="0">No</option></select></label></div><button>Create user</button></form></section>
+<section class="card wide"><h2>Existing users</h2><table><tr><th>Name</th><th>Email</th><th>Role</th><th>Hourly rate</th><th>Active</th><th>Actions</th></tr>{% for u in users %}<tr><form method="post" action="{{url_for('edit_user_v10',user_id=u.id)}}"><td><input name="display_name" value="{{u.display_name}}" required></td><td><input type="email" name="email" value="{{u.email}}" required></td><td><select name="system_role"><option {% if u.system_role=='Timekeeper' %}selected{% endif %}>Timekeeper</option><option {% if u.system_role=='Administrator' %}selected{% endif %}>Administrator</option></select></td><td><input type="number" min="0" step="0.01" name="hourly_rate" value="{{u.default_hourly_rate or 0}}"></td><td><select name="active"><option value="1" {% if u.active %}selected{% endif %}>Yes</option><option value="0" {% if not u.active %}selected{% endif %}>No</option></select></td><td><button>Save details</button></form>{% if u.id != session.get('uid') %}<form method="post" action="{{url_for('remove_user_v8',user_id=u.id)}}" onsubmit="return confirm('Remove or deactivate this user?');"><button class="danger">Remove</button></form>{% endif %}</td></tr>{% endfor %}</table></section>{% endblock %}'''
+
+
+def users_v10():
+    return render_template_string(USER_ADMIN_V10, users=User.query.order_by(User.display_name).all())
+
+
+@app.post('/admin/users-v10/<int:user_id>/edit')
+@login_required
+@admin_required
+def edit_user_v10(user_id):
+    user = db.session.get(User, user_id)
+    if not user:
+        flash('User not found.')
+        return redirect(url_for('users_v8'))
+    email = request.form['email'].strip().lower()
+    duplicate = User.query.filter(db.func.lower(User.email) == email, User.id != user.id).first()
+    if duplicate:
+        flash('Another user already uses this email address.')
+        return redirect(url_for('users_v8'))
+    user.display_name = request.form['display_name'].strip()
+    user.email = email
+    user.system_role = request.form.get('system_role') or user.system_role
+    user.default_hourly_rate = max(0, fnum(request.form.get('hourly_rate'), 0))
+    user.active = request.form.get('active') == '1'
+    db.session.commit()
+    if user.id == session.get('uid'):
+        session['name'] = user.display_name
+        session['role'] = user.system_role
+    flash('User details updated.')
+    return redirect(url_for('users_v8'))
+
+
+app.view_functions['users_v8'] = login_required(admin_required(users_v10))
+
+
+# Data-management page with automatic form population for existing records.
+DATA_MANAGEMENT_V10 = r'''{% extends "base.html" %}{% block content %}<h1>Data management</h1><p>Select an existing record to load its saved details, edit them, and save.</p>
+<div class="cards"><section class="card"><a href="{{url_for('users_v8')}}">Users and timekeepers</a></section><section class="card"><a href="{{url_for('contact_links_v8')}}">Contact-client links</a></section></div>
+<section class="card"><h2>Client Record</h2><form method="post" action="{{url_for('client_fact_v7')}}"><div class="grid"><label>Existing<select id="client-record" name="id"><option value="">New client</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label><label>Name<input name="name" required></label><label>Billing name<input name="billing_name"></label><label>Address<textarea name="address"></textarea></label><label>Country<input name="country"></label><label>VAT number<input name="vat_number"></label><label>Language<input name="language" value="English"></label><label>Currency<input name="currency" value="EUR"></label><label>Payment terms<input name="payment_terms"></label><label>VAT treatment<input name="vat_treatment"></label><label>Billing email<input type="email" name="billing_email"></label><label>Optional client rate<input type="number" step="0.01" name="rate"></label></div><button>Save Client Record</button></form></section>
+<section class="card"><h2>Contact Record</h2><form method="post" action="{{url_for('contact_fact_v7')}}"><div class="grid"><label>Existing<select id="contact-record" name="id"><option value="">New contact</option>{% for x in contacts %}<option value="{{x.id}}">{{x.display_name}}</option>{% endfor %}</select></label><label>Name<input name="name" required></label><label>Title<input name="title"></label><label>Exact salutation<select name="salutation"><option>Tu</option><option>Vous</option><option>Sie</option><option>Du</option></select></label><label>Preferred language<input name="preferred_language"></label><label>Email<input type="email" name="email"></label><label>Phone<input name="phone"></label><label>Address<textarea name="address"></textarea></label><label>Primary linked client<select name="client_id"><option value="">None</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label></div><button>Save Contact Record</button></form></section>
+<section class="card"><h2>Matter Record</h2><form method="post" action="{{url_for('matter_fact_v7')}}"><div class="grid"><label>Existing<select id="matter-record" name="id"><option value="">New matter</option>{% for m in matters %}<option value="{{m.id}}">{{m.reference or ''}} | {{m.name}}</option>{% endfor %}</select></label><label>Matter name<input name="name" required></label><label>Nature<input name="nature"></label><label>Reference number(s)<input name="reference"></label><label>Linked client<select name="client_id" required>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label><label>Linked contact<select name="contact_id"><option value="">None</option>{% for x in contacts %}<option value="{{x.id}}">{{x.display_name}}</option>{% endfor %}</select></label><label>Billing method<input name="billing_method"></label><label>Hourly rate<input type="number" step="0.01" name="hourly_rate"></label><label>Daily rate<input type="number" step="0.01" name="daily_rate"></label><label>Currency<input name="currency" value="EUR"></label><label>Payment terms<input name="payment_terms"></label><label>Billing notes<textarea name="billing_notes"></textarea></label></div><button>Save Matter Record</button></form></section>
+<script>
+const clients={{client_payload|tojson}},contacts={{contact_payload|tojson}},matters={{matter_payload|tojson}};
+function fill(selectId,data){const select=document.getElementById(selectId),form=select.closest('form');select.addEventListener('change',()=>{const row=data[select.value]||{};[...form.elements].forEach(el=>{if(!el.name||el.name==='id')return;let value=row[el.name];if(value===undefined||value===null)value='';el.value=value;});});}
+fill('client-record',clients);fill('contact-record',contacts);fill('matter-record',matters);
+</script>{% endblock %}'''
+
+
+def data_management_v10():
+    clients = Client.query.order_by(Client.name).all()
+    contacts = Contact.query.order_by(Contact.display_name).all()
+    matters = Matter.query.order_by(Matter.name).all()
+    return render_template_string(
+        DATA_MANAGEMENT_V10,
+        clients=clients, contacts=contacts, matters=matters,
+        client_payload={str(c.id): _v10_client_payload(c) for c in clients},
+        contact_payload={str(c.id): _v10_contact_payload(c) for c in contacts},
+        matter_payload={str(m.id): _v10_matter_payload(m) for m in matters},
+    )
+
+
+app.view_functions['master_v4'] = login_required(admin_required(data_management_v10))
+
+
+# Many-to-many contact/client linking. Contact.client_id remains the primary link for
+# compatibility, while ContactClientLinkV10 stores every selected relationship.
+CONTACT_LINKS_V10 = r'''{% extends "base.html" %}{% block content %}<h1>Link contacts to clients</h1><p>Each contact may be linked to multiple clients, and each client may have multiple contacts.</p><section class="card wide"><table><tr><th>Contact</th><th>Email</th><th>Linked clients</th><th></th></tr>{% for x in contacts %}<tr><form method="post" action="{{url_for('link_contact_clients_v10',contact_id=x.id)}}"><td>{{x.display_name}}</td><td>{{x.email}}</td><td><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px">{% for c in clients %}<label class="check"><input type="checkbox" name="client_ids" value="{{c.id}}" {% if c.id in links.get(x.id,[]) %}checked{% endif %}> {{c.name}}</label>{% endfor %}</div></td><td><button>Save links</button></td></form></tr>{% endfor %}</table></section>{% endblock %}'''
+
+
+def contact_links_v10():
+    links = {}
+    for row in ContactClientLinkV10.query.all():
+        links.setdefault(row.contact_id, []).append(row.client_id)
+    for contact in Contact.query.filter(Contact.client_id.isnot(None)).all():
+        links.setdefault(contact.id, [])
+        if contact.client_id not in links[contact.id]:
+            links[contact.id].append(contact.client_id)
+    return render_template_string(
+        CONTACT_LINKS_V10,
+        contacts=Contact.query.order_by(Contact.display_name).all(),
+        clients=Client.query.order_by(Client.name).all(),
+        links=links,
+    )
+
+
+@app.post('/admin/contact-links-v10/<int:contact_id>')
+@login_required
+@admin_required
+def link_contact_clients_v10(contact_id):
+    contact = db.session.get(Contact, contact_id)
+    selected = []
+    for value in request.form.getlist('client_ids'):
+        try:
+            selected.append(int(value))
+        except (TypeError, ValueError):
+            pass
+    ContactClientLinkV10.query.filter_by(contact_id=contact_id).delete()
+    for client_id in sorted(set(selected)):
+        if db.session.get(Client, client_id):
+            db.session.add(ContactClientLinkV10(contact_id=contact_id, client_id=client_id))
+    contact.client_id = selected[0] if selected else None
+    db.session.commit()
+    flash('Contact-client links updated.')
+    return redirect(url_for('contact_links_v8'))
+
+
+app.view_functions['contact_links_v8'] = login_required(admin_required(contact_links_v10))
+
