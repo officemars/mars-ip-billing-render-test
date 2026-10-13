@@ -560,26 +560,20 @@ TIMER_PAGE_V8=TIMER_PAGE_V7.replace(
     '<button>Start timer</button>'
 ).replace(
     '<h2>Active entries</h2>',
-    '<section class="card"><h2>My hourly rate</h2><form method="post" action="{{url_for(\'my_rate_v8\')}}"><label>Default hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="{{current_user.default_hourly_rate or 0}}" required></label><button>Save my hourly rate</button></form></section><h2>Active entries</h2>'
+    '<h2>Active entries</h2>'
 )
 
 def timer_v8():
-    current_user=db.session.get(User,session['uid'])
     active=Timer.query.filter(Timer.user_id==session['uid'],Timer.status.in_(['Running','Paused'])).order_by(Timer.id.desc()).all()
     for entry in active:entry.seconds=elapsed_safe(entry)
     recent=Timer.query.filter_by(user_id=session['uid'],status='Stopped').order_by(Timer.id.desc()).limit(30).all()
-    return render_template_string(TIMER_PAGE_V8,clients=Client.query.order_by(Client.name).all(),active=active,recent=recent,current_user=current_user,now_local=datetime.now().strftime('%Y-%m-%dT%H:%M'))
+    return render_template_string(TIMER_PAGE_V8,clients=Client.query.order_by(Client.name).all(),active=active,recent=recent,now_local=datetime.now().strftime('%Y-%m-%dT%H:%M'))
 
 def start_timer_v8():
     user=db.session.get(User,session['uid']);client=db.session.get(Client,int(request.form['client_id']));matter=db.session.get(Matter,int(request.form['matter_id']))
     rate=matter.matter_hourly_rate if matter.matter_hourly_rate is not None else client.client_hourly_rate if client.client_hourly_rate is not None else user.default_hourly_rate
     entry=Timer(user_id=user.id,client_id=client.id,matter_id=matter.id,category=None,services=request.form['services'].strip(),notes=request.form.get('notes',''),start_time=parse_custom_start_v8(request.form.get('custom_start')),status='Running',paused_seconds=0,timekeeper_rate=user.default_hourly_rate,client_rate=client.client_hourly_rate,matter_rate=matter.matter_hourly_rate,applied_rate=rate or 0,billable=matter.billable and request.form.get('billable')=='1',invoiced_status='Unbilled')
     db.session.add(entry);db.session.commit();flash('Timer started.');return redirect(url_for('timer'))
-
-@app.post('/account/hourly-rate-v8')
-@login_required
-def my_rate_v8():
-    user=db.session.get(User,session['uid']);user.default_hourly_rate=max(0,fnum(request.form.get('hourly_rate'),0));db.session.commit();flash('Your hourly rate was updated.');return redirect(url_for('timer'))
 
 app.view_functions['timer']=login_required(timer_v8)
 app.view_functions['start_timer_v4']=login_required(start_timer_v8)
@@ -638,3 +632,33 @@ FACTS_V8=FACTS_V7.replace('<p>Complete Client, Contact, Matter and Timekeeper Re
 def facts_v8():return render_template_string(FACTS_V8,clients=Client.query.order_by(Client.name).all(),contacts=Contact.query.order_by(Contact.display_name).all(),matters=Matter.query.order_by(Matter.name).all(),users=User.query.order_by(User.display_name).all())
 app.view_functions['master_v4']=login_required(admin_required(facts_v8))
 
+
+# Optional custom stop date/time. Leaving it empty keeps the proven system stop-time flow.
+_original_stop_v8 = app.view_functions['stop_timer']
+
+def stop_timer_v81(timer_id):
+    entry = Timer.query.filter_by(id=timer_id, user_id=session['uid']).first_or_404()
+    custom_stop = request.form.get('custom_stop', '').strip()
+    if not custom_stop:
+        return _original_stop_v8(timer_id)
+    stop_at = parse_custom_start_v8(custom_stop)
+    start_at = entry.start_time
+    if start_at and start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    if not start_at or stop_at < start_at:
+        flash('The custom stop date and time must be after the start date and time.')
+        return redirect(url_for('timer'))
+    entry.stop_time = stop_at
+    entry.status = 'Stopped'
+    worked = max(0.0, (stop_at - start_at).total_seconds() - float(entry.paused_seconds or 0)) / 3600
+    entry.worked_hours = round(worked, 4)
+    override = request.form.get('billable_hours', '').strip()
+    entry.billable_hours = max(0.0, fnum(override, worked)) if entry.billable else 0
+    entry.amount = round(float(entry.billable_hours or 0) * float(entry.applied_rate or 0), 2)
+    if request.form.get('notes') is not None:
+        entry.notes = request.form.get('notes', '')
+    db.session.commit()
+    flash('Time entry saved with the selected stop date and time.')
+    return redirect(url_for('timer'))
+
+app.view_functions['stop_timer'] = login_required(stop_timer_v81)
