@@ -1549,3 +1549,125 @@ def invoice_tag_style_v14(response):
         html=response.get_data(as_text=True);css='''<style id="invoice-tag-style-v14">.invoice-tag{display:inline-block;padding:4px 8px;border-radius:999px;font-size:.82rem;font-weight:700;white-space:normal}.invoice-tag.billed{background:#e7f6ec;color:#176b36;border:1px solid #9ed6ae}.invoice-tag.unbilled{background:#f2f4f7;color:#475467;border:1px solid #d0d5dd}</style>'''
         if 'invoice-tag-style-v14' not in html:html=html.replace('</head>',css+'</head>') if '</head>' in html else css+html;response.set_data(html);response.headers['Content-Length']=len(response.get_data())
     return response
+
+# ==================== CHANGE 3.15: RUNTIME COMPATIBILITY REPAIR ====================
+# Self-contained definitions required by Change 3.14 in consolidated deployments.
+
+
+def active_clients_v12():
+    clients = Client.query.order_by(Client.name).all()
+    output = []
+    for client in clients:
+        try:
+            active = fact_data('client', client.id).get('active', True)
+        except Exception:
+            active = True
+        if active not in (False, 0, '0', 'false', 'False', 'no', 'No'):
+            output.append(client)
+    return output
+
+
+def refresh_unbilled_rates_v12(user_id=None, client_id=None):
+    query = Timer.query.filter(Timer.invoiced_status != 'Invoiced')
+    if user_id is not None:
+        query = query.filter(Timer.user_id == user_id)
+    if client_id is not None:
+        query = query.filter(Timer.client_id == client_id)
+    for entry in query.all():
+        user = db.session.get(User, entry.user_id)
+        client = db.session.get(Client, entry.client_id)
+        matter = db.session.get(Matter, entry.matter_id)
+        if not user or not client:
+            continue
+        rate = effective_rate_v11(user, client, matter) if matter else float(user.default_hourly_rate or 0)
+        entry.timekeeper_rate = user.default_hourly_rate
+        entry.matter_rate = matter.matter_hourly_rate if matter else None
+        entry.applied_rate = rate
+        entry.amount = round(float(entry.billable_hours or 0) * float(rate or 0), 2)
+    db.session.commit()
+
+
+def billing_refs_v13(timer_id):
+    timer = db.session.get(Timer, timer_id)
+    if not timer or not timer.invoice_number:
+        return []
+    return [x.strip() for x in str(timer.invoice_number).split('|') if x.strip()]
+
+
+def invoice_references_text_v15(timer_id):
+    refs = billing_refs_v13(timer_id)
+    return ' | '.join(dict.fromkeys(refs)) if refs else 'Unbilled'
+
+# Replace the Change 3.14 helper with its self-contained implementation.
+invoice_references_text_v14 = invoice_references_text_v15
+
+
+ARCHIVE_COMPAT_V15 = r'''{% extends "base.html" %}{% block content %}<h1>Archive</h1><p><a href="{{url_for('admin')}}">Back to Administration</a></p><section class="card wide"><h2>Archived users</h2><table><tr><th>Name</th><th>Email</th><th>Historical entries</th><th></th></tr>{% for u in users %}<tr><td>{{u.display_name}}</td><td>{{u.email}}</td><td>{{user_counts.get(u.id,0)}}</td><td><form method="post" action="{{url_for('archive_user_compat_v15',user_id=u.id)}}"><button>Unarchive</button></form></td></tr>{% else %}<tr><td colspan="4">No archived users.</td></tr>{% endfor %}</table></section><section class="card wide"><h2>Archived clients</h2><table><tr><th>Name</th><th>Country</th><th>Historical entries</th><th></th></tr>{% for c in clients %}<tr><td>{{c.name}}</td><td>{{c.country or ''}}</td><td>{{client_counts.get(c.id,0)}}</td><td><form method="post" action="{{url_for('archive_client_compat_v15',client_id=c.id)}}"><button>Unarchive</button></form></td></tr>{% else %}<tr><td colspan="4">No archived clients.</td></tr>{% endfor %}</table></section>{% endblock %}'''
+
+@app.get('/admin/archive-v15')
+@login_required
+@admin_required
+def archive_compat_v15():
+    users = User.query.filter_by(active=False).order_by(User.display_name).all()
+    clients = []
+    for client in Client.query.order_by(Client.name).all():
+        active = fact_data('client', client.id).get('active', True)
+        if active in (False, 0, '0', 'false', 'False', 'no', 'No'):
+            clients.append(client)
+    return render_template_string(ARCHIVE_COMPAT_V15, users=users, clients=clients,
+        user_counts={u.id:Timer.query.filter_by(user_id=u.id).count() for u in users},
+        client_counts={c.id:Timer.query.filter_by(client_id=c.id).count() for c in clients})
+
+@app.post('/admin/archive-v15/user/<int:user_id>')
+@login_required
+@admin_required
+def archive_user_compat_v15(user_id):
+    user = db.session.get(User, user_id)
+    if user:
+        user.active = True; db.session.commit(); flash('User unarchived.')
+    return redirect(url_for('archive_compat_v15'))
+
+@app.post('/admin/archive-v15/client/<int:client_id>')
+@login_required
+@admin_required
+def archive_client_compat_v15(client_id):
+    client = db.session.get(Client, client_id)
+    if client:
+        save_fact('client', client.id, {'active': True}); db.session.commit(); flash('Client unarchived.')
+    return redirect(url_for('archive_compat_v15'))
+
+
+PASSWORD_RESETS_COMPAT_V15 = r'''{% extends "base.html" %}{% block content %}<h1>Password reset requests</h1><p><a href="{{url_for('admin')}}">Back to Administration</a></p><section class="card wide"><table><tr><th>Email</th><th>Requested</th></tr>{% for r in requests %}<tr><td>{{r.email}}</td><td>{{r.requested_at}}</td></tr>{% else %}<tr><td colspan="2">No open requests.</td></tr>{% endfor %}</table></section>{% endblock %}'''
+
+@app.get('/admin/password-resets-v15')
+@login_required
+@admin_required
+def password_resets_compat_v15():
+    rows = PasswordResetRequest.query.filter_by(resolved_at=None).order_by(PasswordResetRequest.requested_at).all()
+    return render_template_string(PASSWORD_RESETS_COMPAT_V15, requests=rows)
+
+
+# Final stable Administration page. It references only endpoints defined in this file.
+def admin_runtime_fixed_v15():
+    return render_template_string(r'''{% extends "base.html" %}{% block content %}<h1>Administration</h1><div class="cards"><section class="card"><h2>Invoice register</h2><a href="{{url_for('invoice_register_v5')}}">Open invoice register</a></section><section class="card"><h2>Data management</h2><a href="{{url_for('master_v4')}}">Open Data management</a></section><section class="card"><h2>Users and rates</h2><a href="{{url_for('users_v8')}}">Open user and rate management</a></section><section class="card"><h2>Entries</h2><a href="{{url_for('entries_v14')}}">Open Entries</a></section><section class="card"><h2>Archive</h2><a href="{{url_for('archive_compat_v15')}}">Open Archive</a></section><section class="card"><h2>Password resets</h2><a href="{{url_for('password_resets_compat_v15')}}">Open reset requests</a></section></div><section class="card"><h2>Invoice numbering</h2><form method="post" action="{{url_for('invoice_sequence_v4')}}"><div class="grid"><label>Invoice prefix<input name="prefix" value="{{prefix}}"></label><label>Next number<input type="number" min="1" name="next_number" value="{{next_number}}"></label></div><button>Save numbering</button></form></section>{% endblock %}''', prefix=setting('invoice_prefix','BER'), next_number=setting('invoice_next','3165'))
+app.view_functions['admin'] = login_required(admin_required(admin_runtime_fixed_v15))
+
+
+# Final stable Timer page uses the proven V11 template and adds invoice history as a
+# deterministic final column without relying on missing intermediate template versions.
+TIMER_PAGE_RUNTIME_V15 = TIMER_PAGE_V11.replace(
+    '<th>Actions</th></tr>',
+    '<th>Actions</th><th>Invoice number(s)</th></tr>'
+).replace(
+    '</form>{% if session.get(\'role\')==\'Administrator\' %}<form method="post" action="{{url_for(\'delete_time_entry_v10\',timer_id=t.id)}}" onsubmit="return confirm(\'Delete this time entry permanently?\');"><button class="danger">Delete</button></form>{% endif %}</td></tr>',
+    '</form>{% if session.get(\'role\')==\'Administrator\' %}<form method="post" action="{{url_for(\'delete_time_entry_v10\',timer_id=t.id)}}" onsubmit="return confirm(\'Delete this time entry permanently?\');"><button class="danger">Delete</button></form>{% endif %}</td><td><span class="{{\'invoice-tag billed\' if invoice_refs.get(t.id)!=\'Unbilled\' else \'invoice-tag unbilled\'}}">{{invoice_refs.get(t.id,\'Unbilled\')}}</span></td></tr>'
+)
+
+def timer_runtime_fixed_v15():
+    active = Timer.query.filter(Timer.user_id==session['uid'],Timer.status.in_(['Running','Paused'])).order_by(Timer.id.desc()).all()
+    for entry in active:
+        entry.seconds = elapsed_safe(entry)
+    recent_query = Timer.query.filter_by(status='Stopped') if session.get('role')=='Administrator' else Timer.query.filter_by(user_id=session['uid'],status='Stopped')
+    recent = recent_query.order_by(Timer.id.desc()).limit(50).all()
+    return render_template_string(TIMER_PAGE_RUNTIME_V15, clients=active_clients_v12(), active=active, recent=recent, invoice_refs={t.id:invoice_references_text_v15(t.id) for t in recent})
+app.view_functions['timer'] = login_required(timer_runtime_fixed_v15)
