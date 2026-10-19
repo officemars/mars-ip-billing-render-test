@@ -1459,439 +1459,93 @@ def contact_links_v11():
 
 app.view_functions['contact_links_v8'] = login_required(admin_required(contact_links_v11))
 
-# ==================== CHANGE 3.12: ARCHIVES, RECORDS, NUMBERING, CONTACT FILTERS, REPORTS ====================
-# Additive extension. Existing code above is retained.
-from flask import abort
-from sqlalchemy import func
-import secrets
-from pathlib import Path
+# ==================== CHANGE 3.14: VISIBLE ARCHIVE, ENTRIES REPORTING, TABLE INVOICE COLUMN ====================
+# Replaces only the Change 3.13 presentation behavior. Existing data and functions remain.
 
 
-def fact_flag_v12(kind, entity_id, key='active', default=True):
-    value = fact_data(kind, entity_id).get(key, default)
-    return value not in (False, 0, '0', 'false', 'False', 'no', 'No')
+def invoice_references_text_v14(timer_id):
+    refs = billing_refs_v13(timer_id)
+    if not refs:
+        timer = db.session.get(Timer, timer_id)
+        if timer and timer.invoice_number:
+            refs = [timer.invoice_number]
+    return ' | '.join(dict.fromkeys(refs)) if refs else 'Unbilled'
 
 
-def client_active_v12(client):
-    return fact_flag_v12('client', client.id, 'active', True)
+# Clear Administration page with an explicit Archive card. Time Reports is removed.
+def admin_v14():
+    return render_template_string(r'''{% extends "base.html" %}{% block content %}<h1>Administration</h1><div class="cards"><section class="card"><h2>Invoice register</h2><a href="{{url_for('invoice_register_v5')}}">Open invoice register</a></section><section class="card"><h2>Data management</h2><a href="{{url_for('master_v4')}}">Open Data management</a></section><section class="card"><h2>Users and rates</h2><a href="{{url_for('users_v8')}}">Open user and rate management</a></section><section class="card"><h2>Entries</h2><p>Review time totals by client, matter and user.</p><a href="{{url_for('entries_v14')}}">Open Entries</a></section><section class="card"><h2>Archive</h2><p>View and restore archived users and clients.</p><a href="{{url_for('archive_v13')}}">Open Archive</a></section><section class="card"><h2>Password resets</h2><a href="{{url_for('password_resets_v12')}}">Open reset requests</a></section></div><section class="card"><h2>Invoice numbering</h2><form method="post" action="{{url_for('invoice_sequence_v4')}}"><div class="grid"><label>Invoice prefix<input name="prefix" value="{{prefix}}"></label><label>Next number<input type="number" min="1" name="next_number" value="{{next_number}}"></label></div><button>Save numbering</button></form></section>{% endblock %}''',prefix=setting('invoice_prefix','BER'),next_number=setting('invoice_next','3165'))
+app.view_functions['admin'] = login_required(admin_required(admin_v14))
+
+# Retire the separate Time Reports page.
+def time_reports_removed_v14():
+    return redirect(url_for('entries_v14'))
+app.view_functions['time_reports_v12'] = login_required(time_reports_removed_v14)
 
 
-def active_clients_v12():
-    return [c for c in Client.query.order_by(Client.name).all() if client_active_v12(c)]
+ENTRIES_V14 = r'''{% extends "base.html" %}{% block content %}<div class="page-head"><div><h1>Entries</h1><p>Time entries and totals. Administrators see all users; other users see only their own entries.</p></div><a href="{{url_for('admin') if session.get('role')=='Administrator' else url_for('timer')}}">Back</a></div><section class="card"><form method="get"><div class="grid"><label>Client<select name="client_id"><option value="">All clients</option>{% for c in clients %}<option value="{{c.id}}" {% if selected_client==c.id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></label><label>Matter<select name="matter_id"><option value="">All matters</option>{% for m in matters %}<option value="{{m.id}}" {% if selected_matter==m.id %}selected{% endif %}>{{m.reference or ''}} | {{m.name}}</option>{% endfor %}</select></label>{% if session.get('role')=='Administrator' %}<label>User<select name="user_id"><option value="">All users</option>{% for u in users %}<option value="{{u.id}}" {% if selected_user==u.id %}selected{% endif %}>{{u.display_name}}</option>{% endfor %}</select></label>{% endif %}</div><button>Apply filters</button></form></section><section class="cards"><section class="card"><h3>Total worked</h3><p>{{'%.4f'|format(total_worked)}} hours</p></section><section class="card"><h3>Total billable</h3><p>{{'%.4f'|format(total_billable)}} hours</p></section><section class="card"><h3>Total amount</h3><p>{{'%.2f'|format(total_amount)}}</p></section></section><section class="card wide table-scroll"><table><thead><tr><th>Date</th>{% if session.get('role')=='Administrator' %}<th>User</th>{% endif %}<th>Client</th><th>Matter</th><th>Service description</th><th>Worked</th><th>Billable</th><th>Rate</th><th>Amount</th><th>Invoice number(s)</th></tr></thead><tbody>{% for t in entries %}<tr><td>{{t.start_time.date() if t.start_time else ''}}</td>{% if session.get('role')=='Administrator' %}<td>{{user_names.get(t.user_id,'')}}</td>{% endif %}<td>{{client_names.get(t.client_id,'')}}</td><td>{{matter_names.get(t.matter_id,'')}}</td><td class="service-column">{{t.services or ''}}</td><td>{{t.worked_hours or 0}}</td><td>{{t.billable_hours or 0}}</td><td>{{t.applied_rate or 0}}</td><td>{{t.amount or 0}}</td><td><span class="{{'invoice-tag billed' if invoice_refs.get(t.id)!='Unbilled' else 'invoice-tag unbilled'}}">{{invoice_refs.get(t.id,'Unbilled')}}</span></td></tr>{% else %}<tr><td colspan="10">No entries match the filters.</td></tr>{% endfor %}</tbody></table></section>{% endblock %}'''
 
-
-def next_entity_number_v12(key, start):
-    current = max(start, int(setting(key, str(start))))
-    set_setting(key, current + 1)
-    return str(current)
-
-
-def effective_rate_v12(user, client, matter):
-    if matter and matter.matter_hourly_rate is not None:
-        return float(matter.matter_hourly_rate)
-    special = UserClientRateV11.query.filter_by(user_id=user.id, client_id=client.id).first()
-    if special is not None:
-        return float(special.hourly_rate)
-    return float(user.default_hourly_rate or 0)
-
-
-def refresh_unbilled_rates_v12(user_id=None, client_id=None):
-    query = Timer.query.filter(Timer.invoiced_status != 'Invoiced')
-    if user_id is not None:
-        query = query.filter(Timer.user_id == user_id)
-    if client_id is not None:
-        query = query.filter(Timer.client_id == client_id)
-    for entry in query.all():
-        user = db.session.get(User, entry.user_id)
-        client = db.session.get(Client, entry.client_id)
-        matter = db.session.get(Matter, entry.matter_id)
-        if not user or not client:
-            continue
-        rate = effective_rate_v12(user, client, matter)
-        special = UserClientRateV11.query.filter_by(user_id=user.id, client_id=client.id).first()
-        entry.timekeeper_rate = user.default_hourly_rate
-        entry.client_rate = special.hourly_rate if special else None
-        entry.matter_rate = matter.matter_hourly_rate if matter else None
-        entry.applied_rate = rate
-        entry.amount = round(float(entry.billable_hours or 0) * rate, 2)
-    db.session.commit()
-
-
-# Initial numbering and VAT defaults. Existing higher sequential values are preserved.
-with app.app_context():
-    if setting('invoice_prefix', '') in ('', 'MARS-INV-' + str(date.today().year) + '-'):
-        set_setting('invoice_prefix', 'BER')
-    if int(setting('invoice_next', '1')) < 3165:
-        set_setting('invoice_next', 3165)
-    if int(setting('client_next', '269')) < 269:
-        set_setting('client_next', 269)
-    if int(setting('matter_next', '127')) < 127:
-        set_setting('matter_next', 127)
-    set_setting('default_vat_rate', setting('default_vat_rate', '19') or '19')
-
-
-# Remove the legacy /admin/full-v4 content while leaving Flask's immutable URL map intact.
-def admin_original_removed_v12():
-    abort(404)
-app.view_functions['admin_original_v4'] = login_required(admin_required(admin_original_removed_v12))
-
-
-# Every user may request a password reset. Admin resolves the request with a temporary password.
-RESET_ADMIN_V12 = r'''{% extends "base.html" %}{% block content %}<h1>Password reset requests</h1><p><a href="{{url_for('admin')}}">Back to Administration</a></p><section class="card wide"><table><tr><th>Email</th><th>Requested</th><th>Temporary password</th><th></th></tr>{% for r in requests %}<tr><form method="post" action="{{url_for('resolve_password_reset_v12',request_id=r.id)}}"><td>{{r.email}}</td><td>{{r.requested_at}}</td><td><input type="password" name="temporary_password" minlength="10" required></td><td><button>Set temporary password</button></td></form></tr>{% else %}<tr><td colspan="4">No open requests.</td></tr>{% endfor %}</table></section>{% endblock %}'''
-
-@app.get('/admin/password-resets-v12')
+@app.get('/entries-v14')
 @login_required
-@admin_required
-def password_resets_v12():
-    rows = PasswordResetRequest.query.filter_by(resolved_at=None).order_by(PasswordResetRequest.requested_at).all()
-    return render_template_string(RESET_ADMIN_V12, requests=rows)
-
-@app.post('/admin/password-resets-v12/<int:request_id>/resolve')
-@login_required
-@admin_required
-def resolve_password_reset_v12(request_id):
-    row = db.session.get(PasswordResetRequest, request_id)
-    user = User.query.filter(db.func.lower(User.email) == row.email.lower()).first() if row else None
-    password = request.form.get('temporary_password', '')
-    if not row or not user:
-        flash('Account or reset request not found.')
-    elif len(password) < 10:
-        flash('Use a temporary password with at least 10 characters.')
-    else:
-        user.password_hash = generate_password_hash(password)
-        user.active = True
-        row.resolved_at = datetime.now(timezone.utc)
-        row.resolved_by = session['uid']
-        db.session.commit()
-        flash('Temporary password saved. Provide it securely to the user.')
-    return redirect(url_for('password_resets_v12'))
+def entries_v14():
+    q=Timer.query
+    selected_user=request.args.get('user_id',type=int);selected_client=request.args.get('client_id',type=int);selected_matter=request.args.get('matter_id',type=int)
+    if session.get('role')!='Administrator':
+        q=q.filter(Timer.user_id==session['uid']);selected_user=session['uid']
+    elif selected_user:q=q.filter(Timer.user_id==selected_user)
+    if selected_client:q=q.filter(Timer.client_id==selected_client)
+    if selected_matter:q=q.filter(Timer.matter_id==selected_matter)
+    entries=q.order_by(Timer.id.desc()).all()
+    return render_template_string(ENTRIES_V14,entries=entries,clients=Client.query.order_by(Client.name).all(),matters=Matter.query.order_by(Matter.name).all(),users=User.query.order_by(User.display_name).all(),selected_user=selected_user,selected_client=selected_client,selected_matter=selected_matter,user_names={u.id:u.display_name for u in User.query.all()},client_names={c.id:c.name for c in Client.query.all()},matter_names={m.id:m.name for m in Matter.query.all()},invoice_refs={t.id:invoice_references_text_v14(t.id) for t in entries},total_worked=sum(float(t.worked_hours or 0) for t in entries),total_billable=sum(float(t.billable_hours or 0) for t in entries),total_amount=sum(float(t.amount or 0) for t in entries))
 
 
-# Admin landing without the removed legacy page.
-def admin_v12():
-    return render_template_string(r'''{% extends "base.html" %}{% block content %}<h1>Administration</h1><div class="cards"><section class="card"><h2>Invoice register</h2><a href="{{url_for('invoice_register_v5')}}">Open invoice register</a></section><section class="card"><h2>Data management</h2><a href="{{url_for('master_v4')}}">Open Data management</a></section><section class="card"><h2>Users and rates</h2><a href="{{url_for('users_v8')}}">Open user and rate management</a></section><section class="card"><h2>Password resets</h2><a href="{{url_for('password_resets_v12')}}">Open reset requests</a></section><section class="card"><h2>Time reports</h2><a href="{{url_for('time_reports_v12')}}">Open time reports</a></section></div><section class="card"><h2>Invoice numbering</h2><form method="post" action="{{url_for('invoice_sequence_v4')}}"><div class="grid"><label>Invoice prefix<input name="prefix" value="{{prefix}}"></label><label>Next number<input type="number" min="1" name="next_number" value="{{next_number}}"></label></div><button>Save numbering</button></form></section>{% endblock %}''', prefix=setting('invoice_prefix','BER'), next_number=setting('invoice_next','3165'))
-app.view_functions['admin'] = login_required(admin_required(admin_v12))
+# Timers page: invoice status is always the final table column.
+TIMER_PAGE_V14 = TIMER_PAGE_V12.replace('<th>Actions</th></tr>','<th>Actions</th><th>Invoice number(s)</th></tr>').replace('</form>{% if session.get(\'role\')==\'Administrator\' %}<form method="post" action="{{url_for(\'delete_time_entry_v10\',timer_id=t.id)}}" onsubmit="return confirm(\'Delete this time entry permanently?\');"><button class="danger">Delete</button></form>{% endif %}</td></tr>','</form>{% if session.get(\'role\')==\'Administrator\' %}<form method="post" action="{{url_for(\'delete_time_entry_v10\',timer_id=t.id)}}" onsubmit="return confirm(\'Delete this time entry permanently?\');"><button class="danger">Delete</button></form>{% endif %}</td><td><span class="{{\'invoice-tag billed\' if invoice_refs.get(t.id)!=\'Unbilled\' else \'invoice-tag unbilled\'}}">{{invoice_refs.get(t.id,\'Unbilled\')}}</span></td></tr>')
 
-
-# Archive/unarchive users without deleting historical records.
-@app.post('/admin/users-v12/<int:user_id>/archive')
-@login_required
-@admin_required
-def archive_user_v12(user_id):
-    user = db.session.get(User, user_id)
-    if not user:
-        flash('User not found.')
-    elif user.id == session['uid']:
-        flash('The current administrator account cannot be archived.')
-    else:
-        user.active = not user.active
-        db.session.commit()
-        flash('User unarchived.' if user.active else 'User archived. Historical data was retained.')
-    return redirect(url_for('users_v8'))
-
-# Override old remove behavior so users are always archived, never deleted.
-def remove_user_archive_v12(user_id):
-    return archive_user_v12(user_id)
-app.view_functions['remove_user_v8'] = login_required(admin_required(remove_user_archive_v12))
-
-
-# User management with standard rate, client-specific rates, and archive controls.
-USER_ADMIN_V12 = r'''{% extends "base.html" %}{% block content %}<div class="page-head"><div><h1>User and timekeeper management</h1><p>Active and archived accounts retain all historical data.</p></div><a href="{{url_for('admin')}}">Back to Administration</a></div><section class="card"><h2>Create user / timekeeper</h2><form method="post" action="{{url_for('create_user_v8')}}"><div class="grid"><label>Display name<input name="display_name" required></label><label>Email<input type="email" name="email" required></label><label>Temporary password<input type="password" name="password" minlength="10" required></label><label>Role<select name="system_role"><option>Timekeeper</option><option>Administrator</option></select></label><label>Standard hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="0"></label><label>Active<select name="active"><option value="1">Yes</option><option value="0">No</option></select></label></div><button>Create user</button></form></section>{% for u in users %}<section class="card wide {% if not u.active %}archived-card{% endif %}"><div class="page-head"><div><h2>{{u.display_name}} {% if not u.active %}<small>(Archived)</small>{% endif %}</h2><p>{{u.email}}</p></div>{% if u.id != session.get('uid') %}<form method="post" action="{{url_for('archive_user_v12',user_id=u.id)}}"><button class="{{'secondary' if not u.active else 'danger'}}">{{'Unarchive' if not u.active else 'Archive'}}</button></form>{% endif %}</div><form method="post" action="{{url_for('edit_user_v10',user_id=u.id)}}"><div class="grid"><label>Name<input name="display_name" value="{{u.display_name}}" required></label><label>Email<input type="email" name="email" value="{{u.email}}" required></label><label>Role<select name="system_role"><option {% if u.system_role=='Timekeeper' %}selected{% endif %}>Timekeeper</option><option {% if u.system_role=='Administrator' %}selected{% endif %}>Administrator</option></select></label><label>Standard hourly rate<input type="number" min="0" step="0.01" name="hourly_rate" value="{{u.default_hourly_rate or 0}}"></label><input type="hidden" name="active" value="{{1 if u.active else 0}}"></div><button>Save user details</button></form><details><summary>Client-specific hourly rates</summary><form method="post" action="{{url_for('save_client_rates_v11',user_id=u.id)}}"><div class="rate-grid">{% for c in clients %}<label>{{c.name}}<input type="number" min="0" step="0.01" name="client_rate_{{c.id}}" value="{{rate_map.get((u.id,c.id),'')}}" placeholder="Standard {{u.default_hourly_rate or 0}}"></label>{% endfor %}</div><button>Save client-specific rates</button></form></details></section>{% endfor %}<style>.page-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.rate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.archived-card{opacity:.78;border-style:dashed}</style>{% endblock %}'''
-
-def users_v12():
-    users = User.query.order_by(User.active.desc(), User.display_name).all()
-    clients = Client.query.order_by(Client.name).all()
-    rate_map = {(r.user_id,r.client_id):r.hourly_rate for r in UserClientRateV11.query.all()}
-    return render_template_string(USER_ADMIN_V12, users=users, clients=clients, rate_map=rate_map)
-app.view_functions['users_v8'] = login_required(admin_required(users_v12))
-
-# Ensure rate changes are reflected in all unbilled entries.
-_old_edit_user_v10 = app.view_functions['edit_user_v10']
-def edit_user_rate_refresh_v12(user_id):
-    response = _old_edit_user_v10(user_id)
-    refresh_unbilled_rates_v12(user_id=user_id)
-    return response
-app.view_functions['edit_user_v10'] = login_required(admin_required(edit_user_rate_refresh_v12))
-
-_old_save_client_rates_v11 = app.view_functions['save_client_rates_v11']
-def save_client_rates_refresh_v12(user_id):
-    response = _old_save_client_rates_v11(user_id)
-    refresh_unbilled_rates_v12(user_id=user_id)
-    return response
-app.view_functions['save_client_rates_v11'] = login_required(admin_required(save_client_rates_refresh_v12))
-
-
-# Rich record forms. Additional fields are persisted in EntityFactSheet JSON.
-DATA_MANAGEMENT_V12 = r'''{% extends "base.html" %}{% block content %}<div class="page-head"><div><h1>Data management</h1><p>Create, update, archive, and unarchive client records. Existing selections automatically populate.</p></div><a href="{{url_for('admin')}}">Back to Administration</a></div><div class="cards"><section class="card"><a href="{{url_for('users_v8')}}">Users and timekeepers</a></section><section class="card"><a href="{{url_for('contact_links_v8')}}">Contact-client links</a></section></div>
-<section class="card wide"><h2>Client Record</h2><form method="post" action="{{url_for('save_client_record_v12')}}"><div class="grid"><label>Existing client<select id="client-record-v12" name="id"><option value="">New client</option>{% for c in clients %}<option value="{{c.id}}">{{c.external_id or ''}} | {{c.name}}{% if not active_map.get(c.id) %} (Archived){% endif %}</option>{% endfor %}</select></label><label>Client Number<input name="client_number" readonly></label><label>Legal or Individual Name<input name="name" required></label><label>Trade Name<input name="trade_name"></label><label>Legal Form<input name="legal_form"></label><label>Country of Incorporation / Residence<input name="country"></label><label>Registration Number<input name="registration_number"></label><label>RCS Number and City<input name="rcs_number_city"></label><label>Business Activity / NAF Code<input name="business_activity"></label><label>Website<input name="website"></label><label>Legal Representative<input name="legal_representative"></label><label>Source / Origin<input name="source_origin"></label><label>Client Since<input type="date" name="client_since"></label><label>Engagement Letter Date<input type="date" name="engagement_date"></label><label>Notes<textarea name="notes"></textarea></label></div><h3>BILLING INFORMATION</h3><div class="grid"><label>Billing Name<input name="billing_name"></label><label>Billing Address<textarea name="address"></textarea></label><label>Country<input name="billing_country"></label><label>VAT Number<input name="vat_number"></label><label>Default Language<input name="language" value="English"></label><label>Default Currency<input name="currency" value="EUR"></label><label>Default Payment Terms<input name="payment_terms"></label><label>Default VAT Treatment<input name="vat_treatment"></label><label>Default Client Hourly Rate<input type="number" step="0.01" name="rate"></label><label>Billing Email<input type="email" name="billing_email"></label><label>Billing Contact<input name="billing_contact"></label><label>Client Billing Reference (optional)<input name="billing_reference"></label><label>Billing Instructions<textarea name="billing_instructions"></textarea></label><label>Active<select name="active"><option value="1">Yes</option><option value="0">No - archive</option></select></label></div><button>Save Client Record</button></form></section>
-<section class="card wide"><h2>Contact Record</h2><form method="post" action="{{url_for('save_contact_record_v12')}}"><div class="grid"><label>Existing contact<select id="contact-record-v12" name="id"><option value="">New contact</option>{% for x in contacts %}<option value="{{x.id}}">{{x.display_name}}</option>{% endfor %}</select></label><label>Contact Type<input name="contact_type"></label><label>Title<input name="title"></label><label>First Name<input name="first_name"></label><label>Last Name<input name="last_name"></label><label>Formal Salutation<select name="salutation"><option>Tu</option><option>Vous</option><option>Sie</option><option>Du</option></select></label><label>Email<input type="email" name="email"></label><label>Phone<input name="phone"></label><label>Mobile<input name="mobile"></label><label>Address<textarea name="address"></textarea></label><label>Preferred Language<input name="preferred_language"></label><label>Linked To Organization<select name="client_id"><option value="">None</option>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label><label>Linked To Person<input name="linked_person"></label><label>Notes<textarea name="notes"></textarea></label></div><button>Save Contact Record</button></form></section>
-<section class="card wide"><h2>Matter Record</h2><form method="post" action="{{url_for('save_matter_record_v12')}}"><div class="grid"><label>Existing matter<select id="matter-record-v12" name="id"><option value="">New matter</option>{% for m in matters %}<option value="{{m.id}}">{{m.reference or ''}} | {{m.name}}</option>{% endfor %}</select></label><label>Matter Number<input name="matter_number" readonly></label><label>Matter Name<input name="name" required></label><label>Nature<input name="nature"></label><label>Matter Reference Number(s)<input name="reference"></label><label>Creation Date<input type="date" name="creation_date"></label><label>Closing Date<input type="date" name="closing_date"></label><label>Notes<textarea name="notes"></textarea></label><label>Linked Client<select name="client_id" required>{% for c in clients %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label><label>Linked Contact<select name="contact_id"><option value="">None</option>{% for x in contacts %}<option value="{{x.id}}">{{x.display_name}}</option>{% endfor %}</select></label></div><h3>BILLING</h3><div class="grid"><label>Billing Mode<input name="billing_mode"></label><label>Applicable Rate<input type="number" step="0.01" name="applicable_rate"></label><label>Matter-Specific Hourly Rate<input type="number" step="0.01" name="hourly_rate"></label><label>Matter-Specific Daily Rate<input type="number" step="0.01" name="daily_rate"></label><label>Fixed Fee<input type="number" step="0.01" name="fixed_fee"></label><label>Currency<input name="currency" value="EUR"></label><label>Payment Terms<input name="payment_terms"></label><label>VAT Treatment<input name="vat_treatment"></label><label>Billing Notes<textarea name="billing_notes"></textarea></label></div><button>Save Matter Record</button></form></section>
-<script>const C={{client_payload|tojson}},X={{contact_payload|tojson}},M={{matter_payload|tojson}};function fill(id,data){const s=document.getElementById(id),f=s.closest('form');s.onchange=()=>{const r=data[s.value]||{};[...f.elements].forEach(e=>{if(!e.name||e.name==='id')return;e.value=r[e.name]??'';});};}fill('client-record-v12',C);fill('contact-record-v12',X);fill('matter-record-v12',M);</script><style>.page-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}</style>{% endblock %}'''
-
-
-def client_payload_v12(c):
-    f = fact_data('client', c.id)
-    return {'client_number': c.external_id or '', 'name':c.name or '', 'trade_name':f.get('trade_name',''), 'legal_form':f.get('legal_form',''), 'country':c.country or '', 'registration_number':f.get('registration_number',''), 'rcs_number_city':f.get('rcs_number_city',''), 'business_activity':f.get('business_activity',''), 'website':f.get('website',''), 'legal_representative':f.get('legal_representative',''), 'source_origin':f.get('source_origin',''), 'client_since':f.get('client_since',''), 'engagement_date':f.get('engagement_date',''), 'notes':f.get('notes',''), 'billing_name':c.billing_name or '', 'address':c.address or '', 'billing_country':f.get('billing_country',c.country or ''), 'vat_number':c.vat_number or '', 'language':c.language or 'English', 'currency':c.currency or 'EUR', 'payment_terms':f.get('payment_terms',''), 'vat_treatment':f.get('vat_treatment',''), 'rate':c.client_hourly_rate if c.client_hourly_rate is not None else '', 'billing_email':f.get('billing_email',''), 'billing_contact':f.get('billing_contact',''), 'billing_reference':f.get('billing_reference',''), 'billing_instructions':f.get('billing_instructions',''), 'active':'1' if client_active_v12(c) else '0'}
-
-
-def contact_payload_v12(x):
-    f=fact_data('contact',x.id)
-    return {'contact_type':f.get('contact_type',''),'title':f.get('title',''),'first_name':f.get('first_name',''),'last_name':f.get('last_name',''),'salutation':f.get('salutation','Vous'),'email':x.email or '','phone':x.phone or '','mobile':f.get('mobile',''),'address':f.get('address',''),'preferred_language':f.get('preferred_language',''),'client_id':x.client_id or '','linked_person':f.get('linked_person',''),'notes':f.get('notes','')}
-
-
-def matter_payload_v12(m):
-    f=fact_data('matter',m.id)
-    return {'matter_number':m.external_id or '','name':m.name or '','nature':f.get('nature',''),'reference':m.reference or '','creation_date':f.get('creation_date',''),'closing_date':f.get('closing_date',''),'notes':f.get('notes',''),'client_id':m.client_id,'contact_id':m.primary_contact_id or '','billing_mode':f.get('billing_mode',''),'applicable_rate':f.get('applicable_rate',''),'hourly_rate':m.matter_hourly_rate if m.matter_hourly_rate is not None else '','daily_rate':f.get('daily_rate',''),'fixed_fee':f.get('fixed_fee',''),'currency':f.get('currency','EUR'),'payment_terms':f.get('payment_terms',''),'vat_treatment':f.get('vat_treatment',''),'billing_notes':f.get('billing_notes','')}
-
-
-def data_management_v12():
-    clients=Client.query.order_by(Client.name).all(); contacts=Contact.query.order_by(Contact.display_name).all(); matters=Matter.query.order_by(Matter.name).all()
-    return render_template_string(DATA_MANAGEMENT_V12,clients=clients,contacts=contacts,matters=matters,active_map={c.id:client_active_v12(c) for c in clients},client_payload={str(c.id):client_payload_v12(c) for c in clients},contact_payload={str(x.id):contact_payload_v12(x) for x in contacts},matter_payload={str(m.id):matter_payload_v12(m) for m in matters})
-app.view_functions['master_v4'] = login_required(admin_required(data_management_v12))
-
-@app.post('/admin/data-management/client-record-v12')
-@login_required
-@admin_required
-def save_client_record_v12():
-    c=db.session.get(Client,int(request.form['id'])) if request.form.get('id') else Client(external_id=next_entity_number_v12('client_next',269))
-    c.name=request.form['name'].strip();c.billing_name=request.form.get('billing_name') or c.name;c.address=request.form.get('address');c.country=request.form.get('country') or request.form.get('billing_country');c.vat_number=request.form.get('vat_number');c.language=request.form.get('language') or 'English';c.currency=request.form.get('currency') or 'EUR';c.client_hourly_rate=fnum(request.form.get('rate'),None)
-    db.session.add(c);db.session.flush();save_fact('client',c.id,{k:request.form.get(k,'') for k in ['trade_name','legal_form','registration_number','rcs_number_city','business_activity','website','legal_representative','source_origin','client_since','engagement_date','notes','billing_country','payment_terms','vat_treatment','billing_email','billing_contact','billing_reference','billing_instructions']}|{'active':request.form.get('active')=='1'})
-    db.session.commit();refresh_unbilled_rates_v12(client_id=c.id);flash('Client Record saved.');return redirect(url_for('master_v4'))
-
-@app.post('/admin/data-management/contact-record-v12')
-@login_required
-@admin_required
-def save_contact_record_v12():
-    x=db.session.get(Contact,int(request.form['id'])) if request.form.get('id') else Contact(external_id='USR-'+datetime.now().strftime('%Y%m%d%H%M%S%f'))
-    first=request.form.get('first_name','').strip();last=request.form.get('last_name','').strip();x.display_name=(first+' '+last).strip() or request.form.get('email','').split('@')[0];x.email=request.form.get('email');x.phone=request.form.get('phone');x.client_id=int(request.form['client_id']) if request.form.get('client_id') else None
-    db.session.add(x);db.session.flush();save_fact('contact',x.id,{k:request.form.get(k,'') for k in ['contact_type','title','first_name','last_name','salutation','mobile','address','preferred_language','linked_person','notes']});db.session.commit();flash('Contact Record saved.');return redirect(url_for('master_v4'))
-
-@app.post('/admin/data-management/matter-record-v12')
-@login_required
-@admin_required
-def save_matter_record_v12():
-    m=db.session.get(Matter,int(request.form['id'])) if request.form.get('id') else Matter(external_id=next_entity_number_v12('matter_next',127))
-    m.name=request.form['name'];m.reference=request.form.get('reference');m.client_id=int(request.form['client_id']);m.primary_contact_id=int(request.form['contact_id']) if request.form.get('contact_id') else None;m.matter_hourly_rate=fnum(request.form.get('hourly_rate'),None);m.billable=True
-    db.session.add(m);db.session.flush();save_fact('matter',m.id,{k:request.form.get(k,'') for k in ['nature','creation_date','closing_date','notes','billing_mode','applicable_rate','daily_rate','fixed_fee','currency','payment_terms','vat_treatment','billing_notes']});db.session.commit();refresh_unbilled_rates_v12(client_id=m.client_id);flash('Matter Record saved.');return redirect(url_for('master_v4'))
-
-
-# Contact filtering for timer. If no links exist, all contacts are returned.
-@app.get('/api/contacts-v12')
-@login_required
-def contacts_for_timer_v12():
-    client_id=request.args.get('client_id',type=int);matter_id=request.args.get('matter_id',type=int)
-    ids=set()
-    if matter_id:
-        matter=db.session.get(Matter,matter_id)
-        if matter and matter.primary_contact_id:ids.add(matter.primary_contact_id)
-    if client_id:
-        ids.update(r.contact_id for r in ContactClientLinkV10.query.filter_by(client_id=client_id).all())
-        ids.update(x.id for x in Contact.query.filter_by(client_id=client_id).all())
-    contacts=Contact.query.filter(Contact.id.in_(ids)).order_by(Contact.display_name).all() if ids else Contact.query.order_by(Contact.display_name).all()
-    return jsonify([{'id':x.id,'name':x.display_name,'email':x.email or ''} for x in contacts])
-
-# Timer page enhancement: active clients and all matching matters are available to every user; linked contact is selectable.
-TIMER_PAGE_V12 = TIMER_PAGE_V11.replace('<label>Matter<select id="matter" name="matter_id" required><option value="">Select a client first</option></select></label>','<label>Matter<select id="matter" name="matter_id" required><option value="">Select a client first</option></select></label><label>Contact<select id="timer-contact" name="contact_id"><option value="">None</option></select></label>').replace("const client=document.getElementById('client'),matter=document.getElementById('matter');","const client=document.getElementById('client'),matter=document.getElementById('matter'),timerContact=document.getElementById('timer-contact');").replace("client.addEventListener('change',async()=>{matter.innerHTML='<option value=\"\">Loading...</option>';if(!client.value){matter.innerHTML='<option value=\"\">Select a client first</option>';return;}const r=await fetch('/api/matters/'+client.value),d=await r.json();matter.innerHTML='<option value=\"\">Select a matter</option>'+d.map(x=>`<option value=\"${x.id}\">${x.reference||''}${x.reference?' | ':''}${x.name}</option>`).join('');});","async function loadContacts(){const r=await fetch('/api/contacts-v12?client_id='+encodeURIComponent(client.value||'')+'&matter_id='+encodeURIComponent(matter.value||'')),d=await r.json();timerContact.innerHTML='<option value=\"\">None</option>'+d.map(x=>`<option value=\"${x.id}\">${x.name}${x.email?' | '+x.email:''}</option>`).join('');} client.addEventListener('change',async()=>{matter.innerHTML='<option value=\"\">Loading...</option>';if(!client.value){matter.innerHTML='<option value=\"\">Select a client first</option>';return;}const r=await fetch('/api/matters/'+client.value),d=await r.json();matter.innerHTML='<option value=\"\">Select a matter</option>'+d.map(x=>`<option value=\"${x.id}\">${x.reference||''}${x.reference?' | ':''}${x.name}</option>`).join('');await loadContacts();});matter.addEventListener('change',loadContacts);")
-
-def timer_v12():
+def timer_v14():
     refresh_unbilled_rates_v12(user_id=None if session.get('role')=='Administrator' else session['uid'])
     active=Timer.query.filter(Timer.user_id==session['uid'],Timer.status.in_(['Running','Paused'])).order_by(Timer.id.desc()).all()
     for e in active:e.seconds=elapsed_safe(e)
     q=Timer.query.filter_by(status='Stopped') if session.get('role')=='Administrator' else Timer.query.filter_by(user_id=session['uid'],status='Stopped')
-    return render_template_string(TIMER_PAGE_V12,clients=active_clients_v12(),active=active,recent=q.order_by(Timer.id.desc()).limit(50).all())
-app.view_functions['timer']=login_required(timer_v12)
-
-_old_start_timer_v11=app.view_functions['start_timer_v4']
-def start_timer_contact_v12():
-    response=_old_start_timer_v11()
-    if request.form.get('contact_id'):
-        newest=Timer.query.filter_by(user_id=session['uid']).order_by(Timer.id.desc()).first()
-        if newest:
-            save_fact('timer',newest.id,{'contact_id':int(request.form['contact_id'])});db.session.commit()
-    return response
-app.view_functions['start_timer_v4']=login_required(start_timer_contact_v12)
+    recent=q.order_by(Timer.id.desc()).limit(50).all()
+    return render_template_string(TIMER_PAGE_V14,clients=active_clients_v12(),active=active,recent=recent,invoice_refs={t.id:invoice_references_text_v14(t.id) for t in recent})
+app.view_functions['timer']=login_required(timer_v14)
 
 
-# VAT defaults and invoice filename.
-_old_recalculate_v5=recalculate_v5
-def recalculate_vat19_v12(draft):
-    if draft.vat_rate is None:
-        draft.vat_rate=19
-    return _old_recalculate_v5(draft)
-recalculate_v5=recalculate_vat19_v12;core.recalculate=recalculate_vat19_v12
-
-_old_issue_v4=app.view_functions['issue_fee_note']
-def issue_named_v12(draft_id):
-    response=_old_issue_v4(draft_id)
-    if hasattr(response,'headers') and response.headers.get('Content-Disposition'):
-        d=db.session.get(FeeNoteDraft,draft_id);number=d.invoice_number or 'BER';client=re.sub(r'[^A-Za-z0-9 ._-]+','',d.client_name or d.billing_name or 'Client').strip();stamp=(d.document_date or date.today().strftime('%Y-%m-%d')).replace('-','')[:8]
-        filename=f'{number} - {client} - Invoice - {stamp}.docx';response.headers['Content-Disposition']=f'attachment; filename="{filename}"'
-    return response
-app.view_functions['issue_fee_note']=login_required(admin_required(issue_named_v12))
-
-
-# Time reports. Admin sees all users; each user sees only their own totals.
-TIME_REPORTS_V12=r'''{% extends "base.html" %}{% block content %}<h1>Time reports</h1><p><a href="{{url_for('admin') if session.get('role')=='Administrator' else url_for('timer')}}">Back</a></p><section class="card"><form method="get"><div class="grid"><label>Client<select name="client_id"><option value="">All clients</option>{% for c in clients %}<option value="{{c.id}}" {% if selected_client==c.id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></label><label>Matter<select name="matter_id"><option value="">All matters</option>{% for m in matters %}<option value="{{m.id}}" {% if selected_matter==m.id %}selected{% endif %}>{{m.reference or ''}} | {{m.name}}</option>{% endfor %}</select></label>{% if session.get('role')=='Administrator' %}<label>User<select name="user_id"><option value="">All users</option>{% for u in users %}<option value="{{u.id}}" {% if selected_user==u.id %}selected{% endif %}>{{u.display_name}}</option>{% endfor %}</select></label>{% endif %}</div><button>Apply filters</button></form></section><section class="card"><h2>Total: {{'%.4f'|format(total)}} hours</h2></section><section class="card wide table-scroll"><table><tr>{% if session.get('role')=='Administrator' %}<th>User</th>{% endif %}<th>Client</th><th>Matter</th><th>Worked hours</th><th>Billable hours</th><th>Amount</th></tr>{% for r in rows %}<tr>{% if session.get('role')=='Administrator' %}<td>{{r.user_name}}</td>{% endif %}<td>{{r.client_name}}</td><td>{{r.matter_name}}</td><td>{{'%.4f'|format(r.worked)}}</td><td>{{'%.4f'|format(r.billable)}}</td><td>{{'%.2f'|format(r.amount)}}</td></tr>{% endfor %}</table></section>{% endblock %}'''
-
-@app.get('/reports/time-v12')
-@login_required
-def time_reports_v12():
-    q=Timer.query.filter_by(status='Stopped')
-    selected_user=request.args.get('user_id',type=int);selected_client=request.args.get('client_id',type=int);selected_matter=request.args.get('matter_id',type=int)
-    if session.get('role')!='Administrator':q=q.filter(Timer.user_id==session['uid']);selected_user=session['uid']
-    elif selected_user:q=q.filter(Timer.user_id==selected_user)
-    if selected_client:q=q.filter(Timer.client_id==selected_client)
-    if selected_matter:q=q.filter(Timer.matter_id==selected_matter)
-    grouped={}
-    for t in q.all():
-        key=(t.user_id,t.client_id,t.matter_id);row=grouped.setdefault(key,{'worked':0.0,'billable':0.0,'amount':0.0});row['worked']+=float(t.worked_hours or 0);row['billable']+=float(t.billable_hours or 0);row['amount']+=float(t.amount or 0)
-    rows=[]
-    for (uid,cid,mid),values in grouped.items():
-        u=db.session.get(User,uid);c=db.session.get(Client,cid);m=db.session.get(Matter,mid);rows.append(type('ReportRow',(),{**values,'user_name':u.display_name if u else '','client_name':c.name if c else '','matter_name':m.name if m else ''})())
-    total=sum(r.worked for r in rows)
-    return render_template_string(TIME_REPORTS_V12,rows=rows,total=total,clients=Client.query.order_by(Client.name).all(),matters=Matter.query.order_by(Matter.name).all(),users=User.query.order_by(User.display_name).all(),selected_user=selected_user,selected_client=selected_client,selected_matter=selected_matter)
-
-
-# Wider data tables and fields throughout the portal.
-@app.after_request
-def widen_all_data_tables_v12(response):
-    if response.status_code==200 and 'text/html' in response.headers.get('Content-Type',''):
-        html=response.get_data(as_text=True);css='''<style id="marsip-wide-tables-v12">.card.wide,.table-scroll{max-width:none!important;width:100%!important;overflow-x:auto!important}table{width:100%!important;min-width:1250px!important;table-layout:auto!important}th,td{min-width:120px!important;vertical-align:top!important}th.service-column,td.service-column,textarea[name="services"],textarea[name="description"]{min-width:500px!important;width:100%!important}td input,td select,td textarea{min-width:150px;box-sizing:border-box}.grid{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))!important}</style>'''
-        if 'marsip-wide-tables-v12' not in html:html=html.replace('</head>',css+'</head>') if '</head>' in html else css+html;response.set_data(html);response.headers['Content-Length']=len(response.get_data())
-    return response
-
-# ==================== CHANGE 3.13: ARCHIVE VIEWS AND MULTI-INVOICE BILLING TAGS ====================
-# Additive extension. Keeps the existing Change 3 components and database records.
-
-class TimerInvoiceLinkV13(db.Model):
-    __tablename__ = 'timer_invoice_link_v13'
-    id = db.Column(db.Integer, primary_key=True)
-    timer_id = db.Column(db.Integer, db.ForeignKey('timer.id'), nullable=False, index=True)
-    draft_id = db.Column(db.Integer, db.ForeignKey(FeeNoteDraft.__tablename__ + '.id'), nullable=True, index=True)
-    invoice_number = db.Column(db.String(255), nullable=False, index=True)
-    issued_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-    __table_args__ = (db.UniqueConstraint('timer_id','invoice_number',name='uq_timer_invoice_v13'),)
-
-with app.app_context():
-    db.create_all()
-    # Backfill the legacy single invoice reference into the new history table.
-    for _entry in Timer.query.filter(Timer.invoice_number.isnot(None)).all():
-        if _entry.invoice_number and not TimerInvoiceLinkV13.query.filter_by(timer_id=_entry.id, invoice_number=_entry.invoice_number).first():
-            db.session.add(TimerInvoiceLinkV13(timer_id=_entry.id, invoice_number=_entry.invoice_number))
-    db.session.commit()
-
-
-def billing_refs_v13(timer_id):
-    return [r.invoice_number for r in TimerInvoiceLinkV13.query.filter_by(timer_id=timer_id).order_by(TimerInvoiceLinkV13.issued_at,TimerInvoiceLinkV13.id).all()]
-
-
-def billing_badge_v13(timer):
-    refs = billing_refs_v13(timer.id)
-    if not refs and (timer.invoiced_status == 'Invoiced' or timer.invoice_number):
-        refs = [timer.invoice_number] if timer.invoice_number else []
-    if not refs:
-        return ''
-    return '<span class="billing-tag-v13">Billed: ' + ' | '.join(refs) + '</span>'
-
-
-# Dedicated archive page. The same records remain visible in their normal management
-# pages, but this gives the administrator one clear place for archived records.
-ARCHIVE_V13 = r'''{% extends "base.html" %}{% block content %}<div class="page-head"><div><h1>Archive</h1><p>Archived users and clients. Archiving never removes historical records.</p></div><a href="{{url_for('admin')}}">Back to Administration</a></div><section class="card wide"><h2>Archived users</h2><table><tr><th>Name</th><th>Email</th><th>Role</th><th>Historical time entries</th><th></th></tr>{% for u in users %}<tr><td>{{u.display_name}}</td><td>{{u.email}}</td><td>{{u.system_role}}</td><td>{{user_counts.get(u.id,0)}}</td><td><form method="post" action="{{url_for('archive_user_v12',user_id=u.id)}}"><button>Unarchive</button></form></td></tr>{% else %}<tr><td colspan="5">No archived users.</td></tr>{% endfor %}</table></section><section class="card wide"><h2>Archived clients</h2><table><tr><th>Client number</th><th>Name</th><th>Country</th><th>Historical time entries</th><th></th></tr>{% for c in clients %}<tr><td>{{c.external_id or ''}}</td><td>{{c.name}}</td><td>{{c.country or ''}}</td><td>{{client_counts.get(c.id,0)}}</td><td><form method="post" action="{{url_for('toggle_client_archive_v13',client_id=c.id)}}"><button>Unarchive</button></form></td></tr>{% else %}<tr><td colspan="5">No archived clients.</td></tr>{% endfor %}</table></section>{% endblock %}'''
-
-@app.get('/admin/archive-v13')
-@login_required
-@admin_required
-def archive_v13():
-    users = User.query.filter_by(active=False).order_by(User.display_name).all()
-    clients = [c for c in Client.query.order_by(Client.name).all() if not client_active_v12(c)]
-    return render_template_string(ARCHIVE_V13, users=users, clients=clients,
-        user_counts={u.id:Timer.query.filter_by(user_id=u.id).count() for u in users},
-        client_counts={c.id:Timer.query.filter_by(client_id=c.id).count() for c in clients})
-
-@app.post('/admin/clients-v13/<int:client_id>/archive')
-@login_required
-@admin_required
-def toggle_client_archive_v13(client_id):
-    client = db.session.get(Client, client_id)
-    if not client:
-        flash('Client not found.')
-    else:
-        new_active = not client_active_v12(client)
-        save_fact('client', client.id, {'active': new_active})
-        db.session.commit()
-        flash('Client unarchived.' if new_active else 'Client archived. Historical data was retained.')
-    return redirect(request.referrer or url_for('archive_v13'))
-
-# Put the archive entry directly on the current Administration page.
-_old_admin_v13 = app.view_functions['admin']
-def admin_with_archive_v13():
-    response = _old_admin_v13()
-    if hasattr(response, 'get_data'):
-        html = response.get_data(as_text=True)
-        archive_card = '<section class="card"><h2>Archive</h2><a href="' + url_for('archive_v13') + '">Open archived users and clients</a></section>'
-        marker = '<section class="card"><h2>Time reports</h2>'
-        if archive_card not in html:
-            html = html.replace(marker, archive_card + marker)
-            response.set_data(html)
-            response.headers['Content-Length'] = len(response.get_data())
-    return response
-app.view_functions['admin'] = login_required(admin_required(admin_with_archive_v13))
-
-
-# Store every invoice reference for each included timer. Re-using the same time entry
-# in another issued invoice appends the new invoice number rather than replacing history.
-_old_issue_v13 = app.view_functions['issue_fee_note']
-def issue_with_history_v13(draft_id):
-    response = _old_issue_v13(draft_id)
-    draft = db.session.get(FeeNoteDraft, draft_id)
-    if draft and draft.invoice_number:
-        for line in FeeNoteLine.query.filter_by(draft_id=draft.id, included=True).all():
-            if not line.source_timer_id:
-                continue
-            timer = db.session.get(Timer, line.source_timer_id)
-            if not timer:
-                continue
-            if not TimerInvoiceLinkV13.query.filter_by(timer_id=timer.id, invoice_number=draft.invoice_number).first():
-                db.session.add(TimerInvoiceLinkV13(timer_id=timer.id, draft_id=draft.id, invoice_number=draft.invoice_number, issued_at=datetime.now(timezone.utc)))
-            timer.invoiced_status = 'Invoiced'
-            # Preserve the latest reference for compatibility with existing code.
-            timer.invoice_number = draft.invoice_number
-        db.session.commit()
-    return response
-app.view_functions['issue_fee_note'] = login_required(admin_required(issue_with_history_v13))
-
-
-# Inject invoice tags beside any rendered time-entry row/card containing a timer edit or
-# timer action URL. This covers the timer/recent-entry pages and legacy/admin time tables.
-@app.after_request
-def billed_tags_everywhere_v13(response):
-    if response.status_code != 200 or 'text/html' not in response.headers.get('Content-Type',''):
+# Invoice preparation: show every included time entry as a complete table with the invoice
+# history in the final column, directly above the existing full editor.
+_old_edit_fee_v14 = app.view_functions['edit_fee_note']
+def edit_fee_note_table_v14(draft_id):
+    response=_old_edit_fee_v14(draft_id)
+    if not hasattr(response,'get_data'):
         return response
-    html = response.get_data(as_text=True)
-    ids = set()
-    for pattern in [r'/timer/(\d+)/', r'/admin/time-entry/(\d+)/']:
-        ids.update(int(x) for x in re.findall(pattern, html))
-    for timer_id in ids:
-        timer = db.session.get(Timer, timer_id)
-        if not timer:
-            continue
-        badge = billing_badge_v13(timer)
-        if not badge:
-            continue
-        # Place the badge at the beginning of each row/card/form block containing this timer URL.
-        for url_fragment in [f'/timer/{timer_id}/', f'/admin/time-entry/{timer_id}/']:
-            pos = html.find(url_fragment)
-            if pos < 0:
-                continue
-            row = html.rfind('<tr', 0, pos)
-            card = html.rfind('<section', 0, pos)
-            start = max(row, card)
-            if start >= 0:
-                open_end = html.find('>', start)
-                if open_end >= 0 and badge not in html[start:pos]:
-                    html = html[:open_end+1] + badge + html[open_end+1:]
-    css = '''<style id="billing-tag-css-v13">.billing-tag-v13{display:inline-block;margin:6px 8px 6px 0;padding:4px 9px;border-radius:999px;background:#e7f6ec;color:#176b36;border:1px solid #9ed6ae;font-size:.82rem;font-weight:700;white-space:normal}</style>'''
-    if 'billing-tag-css-v13' not in html:
-        html = html.replace('</head>', css + '</head>') if '</head>' in html else css + html
-    response.set_data(html);response.headers['Content-Length']=len(response.get_data())
+    lines=FeeNoteLine.query.filter_by(draft_id=draft_id).order_by(FeeNoteLine.sort_order,FeeNoteLine.id).all()
+    timers=[]
+    for line in lines:
+        if line.source_timer_id:
+            t=db.session.get(Timer,line.source_timer_id)
+            if t:timers.append(t)
+    rows=''.join('<tr><td>{}</td><td>{}</td><td>{}</td><td class="service-column">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><span class="invoice-tag {}">{}</span></td></tr>'.format(t.start_time.date() if t.start_time else '',t.user.display_name if getattr(t,'user',None) else (db.session.get(User,t.user_id).display_name if db.session.get(User,t.user_id) else ''),t.client.name if getattr(t,'client',None) else '',t.services or '',t.billable_hours or 0,t.applied_rate or 0,t.amount or 0,'Included' if any(x.source_timer_id==t.id and x.included for x in lines) else 'Not included','billed' if invoice_references_text_v14(t.id)!='Unbilled' else 'unbilled',invoice_references_text_v14(t.id)) for t in timers)
+    table='<section class="card wide table-scroll"><h2>Logged time entries for this invoice</h2><table><tr><th>Date</th><th>User</th><th>Client</th><th>Service description</th><th>Billable hours</th><th>Rate</th><th>Amount</th><th>Invoice selection</th><th>Invoice number(s)</th></tr>'+rows+'</table></section>'
+    html=response.get_data(as_text=True)
+    html=html.replace('<section class="card wide"><h2>Full editable fee note</h2>',table+'<section class="card wide"><h2>Full editable fee note</h2>')
+    response.set_data(html);response.headers['Content-Length']=len(response.get_data());return response
+app.view_functions['edit_fee_note']=login_required(admin_required(edit_fee_note_table_v14))
+
+
+# Disable the prior free-floating tag injector. Tags are now fixed final table columns.
+def billed_tags_everywhere_disabled_v14(response):
+    return response
+# Flask already registered the old after_request callback, so neutralize it by replacing
+# the referenced callback in the registry.
+for _bp,_callbacks in app.after_request_funcs.items():
+    for _i,_callback in enumerate(_callbacks):
+        if getattr(_callback,'__name__','')=='billed_tags_everywhere_v13':
+            _callbacks[_i]=billed_tags_everywhere_disabled_v14
+
+@app.after_request
+def invoice_tag_style_v14(response):
+    if response.status_code==200 and 'text/html' in response.headers.get('Content-Type',''):
+        html=response.get_data(as_text=True);css='''<style id="invoice-tag-style-v14">.invoice-tag{display:inline-block;padding:4px 8px;border-radius:999px;font-size:.82rem;font-weight:700;white-space:normal}.invoice-tag.billed{background:#e7f6ec;color:#176b36;border:1px solid #9ed6ae}.invoice-tag.unbilled{background:#f2f4f7;color:#475467;border:1px solid #d0d5dd}</style>'''
+        if 'invoice-tag-style-v14' not in html:html=html.replace('</head>',css+'</head>') if '</head>' in html else css+html;response.set_data(html);response.headers['Content-Length']=len(response.get_data())
     return response
