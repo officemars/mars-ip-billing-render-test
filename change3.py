@@ -1681,3 +1681,46 @@ def issue_fee_note_v16(draft_id):
     return send_file(out,as_attachment=True,download_name=filename,mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
 
 app.view_functions['issue_fee_note']=login_required(admin_required(issue_fee_note_v16))
+
+# ==================== CHANGE 3.16.1: TIMER RUNTIME DEPENDENCY FIX ====================
+# Final self-contained timer override. This intentionally does not refresh rates on GET.
+
+def active_clients_runtime_v161():
+    result=[]
+    for client in Client.query.order_by(Client.name).all():
+        try:
+            active=fact_data('client',client.id).get('active',True)
+        except Exception:
+            active=True
+        if active not in (False,0,'0','false','False','no','No'):
+            result.append(client)
+    return result
+
+
+def invoice_ref_runtime_v161(timer):
+    value=(timer.invoice_number or '').strip()
+    return value if value else 'Unbilled'
+
+
+def timer_runtime_v161():
+    active=Timer.query.filter(
+        Timer.user_id==session['uid'],
+        Timer.status.in_(['Running','Paused'])
+    ).order_by(Timer.id.desc()).all()
+    for entry in active:
+        entry.seconds=elapsed_safe(entry)
+    if session.get('role')=='Administrator':
+        recent_query=Timer.query.filter_by(status='Stopped')
+    else:
+        recent_query=Timer.query.filter_by(user_id=session['uid'],status='Stopped')
+    recent=recent_query.order_by(Timer.id.desc()).limit(50).all()
+    return render_template_string(
+        TIMER_PAGE_RUNTIME_V15,
+        clients=active_clients_runtime_v161(),
+        active=active,
+        recent=recent,
+        invoice_refs={t.id:invoice_ref_runtime_v161(t) for t in recent},
+    )
+
+# This is the final /timer handler in the file and therefore overrides timer_v14/v16.
+app.view_functions['timer']=login_required(timer_runtime_v161)
