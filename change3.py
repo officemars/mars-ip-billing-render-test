@@ -1759,3 +1759,139 @@ def widen_all_data_tables_v12(response):
         html=response.get_data(as_text=True);css='''<style id="marsip-wide-tables-v12">.card.wide,.table-scroll{max-width:none!important;width:100%!important;overflow-x:auto!important}table{width:100%!important;min-width:1250px!important;table-layout:auto!important}th,td{min-width:120px!important;vertical-align:top!important}th.service-column,td.service-column,textarea[name="services"],textarea[name="description"]{min-width:500px!important;width:100%!important}td input,td select,td textarea{min-width:150px;box-sizing:border-box}.grid{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))!important}</style>'''
         if 'marsip-wide-tables-v12' not in html:html=html.replace('</head>',css+'</head>') if '</head>' in html else css+html;response.set_data(html);response.headers['Content-Length']=len(response.get_data())
     return response
+
+# ==================== CHANGE 3.13: ARCHIVE VIEWS AND MULTI-INVOICE BILLING TAGS ====================
+# Additive extension. Keeps the existing Change 3 components and database records.
+
+class TimerInvoiceLinkV13(db.Model):
+    __tablename__ = 'timer_invoice_link_v13'
+    id = db.Column(db.Integer, primary_key=True)
+    timer_id = db.Column(db.Integer, db.ForeignKey('timer.id'), nullable=False, index=True)
+    draft_id = db.Column(db.Integer, db.ForeignKey(FeeNoteDraft.__tablename__ + '.id'), nullable=True, index=True)
+    invoice_number = db.Column(db.String(255), nullable=False, index=True)
+    issued_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    __table_args__ = (db.UniqueConstraint('timer_id','invoice_number',name='uq_timer_invoice_v13'),)
+
+with app.app_context():
+    db.create_all()
+    # Backfill the legacy single invoice reference into the new history table.
+    for _entry in Timer.query.filter(Timer.invoice_number.isnot(None)).all():
+        if _entry.invoice_number and not TimerInvoiceLinkV13.query.filter_by(timer_id=_entry.id, invoice_number=_entry.invoice_number).first():
+            db.session.add(TimerInvoiceLinkV13(timer_id=_entry.id, invoice_number=_entry.invoice_number))
+    db.session.commit()
+
+
+def billing_refs_v13(timer_id):
+    return [r.invoice_number for r in TimerInvoiceLinkV13.query.filter_by(timer_id=timer_id).order_by(TimerInvoiceLinkV13.issued_at,TimerInvoiceLinkV13.id).all()]
+
+
+def billing_badge_v13(timer):
+    refs = billing_refs_v13(timer.id)
+    if not refs and (timer.invoiced_status == 'Invoiced' or timer.invoice_number):
+        refs = [timer.invoice_number] if timer.invoice_number else []
+    if not refs:
+        return ''
+    return '<span class="billing-tag-v13">Billed: ' + ' | '.join(refs) + '</span>'
+
+
+# Dedicated archive page. The same records remain visible in their normal management
+# pages, but this gives the administrator one clear place for archived records.
+ARCHIVE_V13 = r'''{% extends "base.html" %}{% block content %}<div class="page-head"><div><h1>Archive</h1><p>Archived users and clients. Archiving never removes historical records.</p></div><a href="{{url_for('admin')}}">Back to Administration</a></div><section class="card wide"><h2>Archived users</h2><table><tr><th>Name</th><th>Email</th><th>Role</th><th>Historical time entries</th><th></th></tr>{% for u in users %}<tr><td>{{u.display_name}}</td><td>{{u.email}}</td><td>{{u.system_role}}</td><td>{{user_counts.get(u.id,0)}}</td><td><form method="post" action="{{url_for('archive_user_v12',user_id=u.id)}}"><button>Unarchive</button></form></td></tr>{% else %}<tr><td colspan="5">No archived users.</td></tr>{% endfor %}</table></section><section class="card wide"><h2>Archived clients</h2><table><tr><th>Client number</th><th>Name</th><th>Country</th><th>Historical time entries</th><th></th></tr>{% for c in clients %}<tr><td>{{c.external_id or ''}}</td><td>{{c.name}}</td><td>{{c.country or ''}}</td><td>{{client_counts.get(c.id,0)}}</td><td><form method="post" action="{{url_for('toggle_client_archive_v13',client_id=c.id)}}"><button>Unarchive</button></form></td></tr>{% else %}<tr><td colspan="5">No archived clients.</td></tr>{% endfor %}</table></section>{% endblock %}'''
+
+@app.get('/admin/archive-v13')
+@login_required
+@admin_required
+def archive_v13():
+    users = User.query.filter_by(active=False).order_by(User.display_name).all()
+    clients = [c for c in Client.query.order_by(Client.name).all() if not client_active_v12(c)]
+    return render_template_string(ARCHIVE_V13, users=users, clients=clients,
+        user_counts={u.id:Timer.query.filter_by(user_id=u.id).count() for u in users},
+        client_counts={c.id:Timer.query.filter_by(client_id=c.id).count() for c in clients})
+
+@app.post('/admin/clients-v13/<int:client_id>/archive')
+@login_required
+@admin_required
+def toggle_client_archive_v13(client_id):
+    client = db.session.get(Client, client_id)
+    if not client:
+        flash('Client not found.')
+    else:
+        new_active = not client_active_v12(client)
+        save_fact('client', client.id, {'active': new_active})
+        db.session.commit()
+        flash('Client unarchived.' if new_active else 'Client archived. Historical data was retained.')
+    return redirect(request.referrer or url_for('archive_v13'))
+
+# Put the archive entry directly on the current Administration page.
+_old_admin_v13 = app.view_functions['admin']
+def admin_with_archive_v13():
+    response = _old_admin_v13()
+    if hasattr(response, 'get_data'):
+        html = response.get_data(as_text=True)
+        archive_card = '<section class="card"><h2>Archive</h2><a href="' + url_for('archive_v13') + '">Open archived users and clients</a></section>'
+        marker = '<section class="card"><h2>Time reports</h2>'
+        if archive_card not in html:
+            html = html.replace(marker, archive_card + marker)
+            response.set_data(html)
+            response.headers['Content-Length'] = len(response.get_data())
+    return response
+app.view_functions['admin'] = login_required(admin_required(admin_with_archive_v13))
+
+
+# Store every invoice reference for each included timer. Re-using the same time entry
+# in another issued invoice appends the new invoice number rather than replacing history.
+_old_issue_v13 = app.view_functions['issue_fee_note']
+def issue_with_history_v13(draft_id):
+    response = _old_issue_v13(draft_id)
+    draft = db.session.get(FeeNoteDraft, draft_id)
+    if draft and draft.invoice_number:
+        for line in FeeNoteLine.query.filter_by(draft_id=draft.id, included=True).all():
+            if not line.source_timer_id:
+                continue
+            timer = db.session.get(Timer, line.source_timer_id)
+            if not timer:
+                continue
+            if not TimerInvoiceLinkV13.query.filter_by(timer_id=timer.id, invoice_number=draft.invoice_number).first():
+                db.session.add(TimerInvoiceLinkV13(timer_id=timer.id, draft_id=draft.id, invoice_number=draft.invoice_number, issued_at=datetime.now(timezone.utc)))
+            timer.invoiced_status = 'Invoiced'
+            # Preserve the latest reference for compatibility with existing code.
+            timer.invoice_number = draft.invoice_number
+        db.session.commit()
+    return response
+app.view_functions['issue_fee_note'] = login_required(admin_required(issue_with_history_v13))
+
+
+# Inject invoice tags beside any rendered time-entry row/card containing a timer edit or
+# timer action URL. This covers the timer/recent-entry pages and legacy/admin time tables.
+@app.after_request
+def billed_tags_everywhere_v13(response):
+    if response.status_code != 200 or 'text/html' not in response.headers.get('Content-Type',''):
+        return response
+    html = response.get_data(as_text=True)
+    ids = set()
+    for pattern in [r'/timer/(\d+)/', r'/admin/time-entry/(\d+)/']:
+        ids.update(int(x) for x in re.findall(pattern, html))
+    for timer_id in ids:
+        timer = db.session.get(Timer, timer_id)
+        if not timer:
+            continue
+        badge = billing_badge_v13(timer)
+        if not badge:
+            continue
+        # Place the badge at the beginning of each row/card/form block containing this timer URL.
+        for url_fragment in [f'/timer/{timer_id}/', f'/admin/time-entry/{timer_id}/']:
+            pos = html.find(url_fragment)
+            if pos < 0:
+                continue
+            row = html.rfind('<tr', 0, pos)
+            card = html.rfind('<section', 0, pos)
+            start = max(row, card)
+            if start >= 0:
+                open_end = html.find('>', start)
+                if open_end >= 0 and badge not in html[start:pos]:
+                    html = html[:open_end+1] + badge + html[open_end+1:]
+    css = '''<style id="billing-tag-css-v13">.billing-tag-v13{display:inline-block;margin:6px 8px 6px 0;padding:4px 9px;border-radius:999px;background:#e7f6ec;color:#176b36;border:1px solid #9ed6ae;font-size:.82rem;font-weight:700;white-space:normal}</style>'''
+    if 'billing-tag-css-v13' not in html:
+        html = html.replace('</head>', css + '</head>') if '</head>' in html else css + html
+    response.set_data(html);response.headers['Content-Length']=len(response.get_data())
+    return response
