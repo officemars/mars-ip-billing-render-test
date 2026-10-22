@@ -74,4 +74,58 @@
     display: inline-block;
     min-width: max-content;
     white-space: nowrap !important;
+}/* =========================================================
+   ACTIVE ENTRIES - prevent service fields leaving their card
+   ========================================================= */
+
+/* Every card/grid child is allowed to shrink correctly */
+.cards > *,
+.grid > * {
+    min-width: 0;
+}
+
+/* Forms must never exceed their own card */
+.cards .card form,
+.grid .card form {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+/* Service description stays inside its own card */
+.cards .card textarea[name="services"],
+.cards .card textarea[name="description"],
+.grid .card textarea[name="services"],
+.grid .card textarea[name="description"] {
+    display: block;
+
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+
+    min-height: 110px;
+    resize: vertical;
+
+    box-sizing: border-box;
+}
+
+/* Notes must follow the same rule */
+.cards .card textarea[name="notes"],
+.grid .card textarea[name="notes"] {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+
+    box-sizing: border-box;
+}
+
+/* Absolutely no input or selector may leave an Active Entry card */
+.cards .card input,
+.cards .card select,
+.cards .card textarea,
+.grid .card input,
+.grid .card select,
+.grid .card textarea {
+    max-width: 100%;
+    box-sizing: border-box;
 }
