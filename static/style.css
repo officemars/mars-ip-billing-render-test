@@ -1,1 +1,397 @@
-*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:#222;font:15px Segoe UI,Arial}nav{display:flex;gap:18px;align-items:center;background:#ee7933;color:#fff;padding:14px 24px}nav a{color:#fff;text-decoration:none;font-weight:600}nav span{flex:1}main{max-width:1250px;margin:25px auto;padding:0 18px}.card{background:#fff;padding:22px;border-radius:12px;margin-bottom:18px;box-shadow:0 2px 10px #0001}.narrow{max-width:480px;margin:60px auto}.grid,.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:15px}label{display:block;font-weight:600;margin:10px 0}input,select,textarea{display:block;width:100%;padding:9px;margin-top:5px;border:1px solid #bbb;border-radius:6px}textarea{min-height:80px}button{background:#ee7933;color:#fff;border:0;border-radius:6px;padding:9px 15px;font-weight:700;cursor:pointer}.secondary{background:#4e6e8e}.danger{background:#a61b1b}.flash{background:#fff1cc;padding:12px;border-left:5px solid #ee7933}.clock{font-size:2rem}.wide{overflow:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}th{background:#273746;color:#fff}.check{font-weight:400}.check input{display:inline;width:auto}@media(max-width:650px){nav{flex-wrap:wrap}.grid,.cards{display:block}}
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+body {
+    margin: 0;
+    background: #f3f5f7;
+    color: #222;
+    font: 15px Segoe UI, Arial;
+}
+
+
+/* ---------- Navigation ---------- */
+
+nav {
+    display: flex;
+    gap: 18px;
+    align-items: center;
+    flex-wrap: wrap;
+    background: #ee7933;
+    color: #fff;
+    padding: 14px 24px;
+}
+
+nav a {
+    color: #fff;
+    text-decoration: none;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+nav span {
+    flex: 1;
+}
+
+
+/* ---------- Main layout ---------- */
+
+main {
+    width: 100%;
+    max-width: 1400px;
+    margin: 25px auto;
+    padding: 0 18px;
+    min-width: 0;
+}
+
+.card {
+    background: #fff;
+    padding: 22px;
+    border-radius: 12px;
+    margin-bottom: 18px;
+    box-shadow: 0 2px 10px #0001;
+
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow: visible;
+}
+
+.narrow {
+    max-width: 480px;
+    margin: 60px auto;
+}
+
+
+/* ---------- Grids ---------- */
+
+.grid,
+.cards {
+    display: grid;
+    grid-template-columns:
+        repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+    gap: 15px;
+
+    width: 100%;
+    min-width: 0;
+}
+
+.grid > *,
+.cards > * {
+    min-width: 0;
+    max-width: 100%;
+}
+
+
+/* ---------- Forms ---------- */
+
+form {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+label {
+    display: block;
+    font-weight: 600;
+    margin: 10px 0;
+
+    min-width: 0;
+    max-width: 100%;
+}
+
+input,
+select,
+textarea {
+    display: block;
+
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    padding: 9px;
+    margin-top: 5px;
+
+    border: 1px solid #bbb;
+    border-radius: 6px;
+
+    font: inherit;
+}
+
+
+/* ---------- Text areas ---------- */
+
+textarea {
+    min-height: 90px;
+    resize: vertical;
+
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+textarea[name="services"],
+textarea[name="description"],
+.service-description {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+
+    min-height: 105px !important;
+}
+
+
+/* ---------- Active timer entries ---------- */
+
+.active-entry,
+.active-timer,
+.timer-entry,
+.timer-card {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    overflow: visible;
+}
+
+.active-entry form,
+.active-timer form,
+.timer-entry form,
+.timer-card form {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.active-entry textarea,
+.active-timer textarea,
+.timer-entry textarea,
+.timer-card textarea {
+    display: block;
+
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+
+    resize: vertical;
+}
+
+
+/* ---------- Buttons ---------- */
+
+button {
+    background: #ee7933;
+    color: #fff;
+
+    border: 0;
+    border-radius: 6px;
+
+    padding: 9px 15px;
+
+    font-weight: 700;
+    cursor: pointer;
+
+    max-width: 100%;
+    white-space: normal;
+}
+
+.secondary {
+    background: #4e6e8e;
+}
+
+.danger {
+    background: #a61b1b;
+}
+
+
+/* ---------- Action/button groups ---------- */
+
+.actions,
+.toolbar,
+.page-head,
+.contact-heading,
+.sticky-actions {
+    display: flex;
+    align-items: center;
+
+    gap: 10px;
+    flex-wrap: wrap;
+
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.actions > *,
+.toolbar > *,
+.page-head > *,
+.contact-heading > * {
+    min-width: 0;
+}
+
+
+/* ---------- Flash messages ---------- */
+
+.flash {
+    background: #fff1cc;
+
+    padding: 12px;
+    border-left: 5px solid #ee7933;
+
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+
+
+/* ---------- Timer clock ---------- */
+
+.clock {
+    font-size: 2rem;
+}
+
+
+/* ---------- Tables ---------- */
+
+.wide,
+.table-scroll,
+.table-wrapper,
+.table-responsive {
+    width: 100%;
+    max-width: 100%;
+
+    overflow-x: auto;
+    overflow-y: visible;
+
+    -webkit-overflow-scrolling: touch;
+}
+
+table {
+    width: 100%;
+    max-width: 100%;
+
+    border-collapse: collapse;
+}
+
+th,
+td {
+    padding: 8px;
+
+    border-bottom: 1px solid #ddd;
+
+    text-align: left;
+    vertical-align: top;
+
+    overflow-wrap: anywhere;
+    word-break: normal;
+}
+
+th {
+    background: #273746;
+    color: #fff;
+}
+
+
+/* Keep narrative columns readable */
+
+th.service-column,
+td.service-column {
+    min-width: 280px !important;
+    width: auto !important;
+    max-width: 520px !important;
+}
+
+td input,
+td select,
+td textarea {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+}
+
+
+/* ---------- Long content ---------- */
+
+p,
+a,
+span,
+div,
+td,
+th,
+label {
+    overflow-wrap: anywhere;
+}
+
+.invoice-tag,
+.billing-tag-v13 {
+    max-width: 100%;
+    white-space: normal !important;
+}
+
+
+/* ---------- Checkboxes ---------- */
+
+.check {
+    font-weight: 400;
+}
+
+.check input {
+    display: inline-block;
+    width: auto;
+}
+
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 850px) {
+
+    main {
+        padding: 0 12px;
+    }
+
+    .grid,
+    .cards {
+        grid-template-columns:
+            repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+    }
+
+    th.service-column,
+    td.service-column {
+        min-width: 240px !important;
+    }
+}
+
+
+@media (max-width: 650px) {
+
+    nav {
+        flex-wrap: wrap;
+    }
+
+    .grid,
+    .cards {
+        grid-template-columns: 1fr;
+    }
+
+    .card {
+        padding: 16px;
+    }
+
+    th.service-column,
+    td.service-column {
+        min-width: 220px !important;
+        max-width: 360px !important;
+    }
+
+    button {
+        white-space: normal;
+    }
+}
