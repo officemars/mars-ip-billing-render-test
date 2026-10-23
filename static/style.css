@@ -154,4 +154,57 @@
 
     resize: vertical;
     box-sizing: border-box;
+}/* =========================================================
+   Recent Entries final column sizing
+   Keep Client/Matter compact; Service Description taller.
+   ========================================================= */
+
+/* Client */
+.wide table th:nth-child(2),
+.wide table td:nth-child(2) {
+    width: 150px !important;
+    min-width: 150px !important;
+    max-width: 180px !important;
+
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+}
+
+/* Matter */
+.wide table th:nth-child(3),
+.wide table td:nth-child(3) {
+    width: 190px !important;
+    min-width: 190px !important;
+    max-width: 210px !important;
+
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+}
+
+/* Service Description: roughly 1.5 x Matter */
+.wide table th.service-column,
+.wide table td.service-column {
+    width: 300px !important;
+    min-width: 300px !important;
+    max-width: 300px !important;
+}
+
+/* Use vertical space for descriptions instead */
+.wide table td.service-column textarea,
+.wide table td textarea[name="services"] {
+    width: 300px !important;
+    min-width: 300px !important;
+    max-width: 300px !important;
+
+    height: 150px !important;
+    min-height: 150px !important;
+
+    white-space: pre-wrap !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+
+    resize: vertical;
+    box-sizing: border-box;
 }
