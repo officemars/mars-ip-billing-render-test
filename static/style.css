@@ -128,4 +128,30 @@
 .grid .card textarea {
     max-width: 100%;
     box-sizing: border-box;
+}/* Recent Entries: service description about 1.5x Matter width, taller rather than wider */
+.wide table td.service-column,
+.wide table th.service-column {
+    width: 300px !important;
+    min-width: 300px !important;
+    max-width: 300px !important;
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+}
+
+.wide table td.service-column textarea,
+.wide table td textarea[name="services"] {
+    width: 300px !important;
+    min-width: 300px !important;
+    max-width: 300px !important;
+
+    min-height: 150px !important;
+    height: 150px;
+
+    white-space: pre-wrap !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+
+    resize: vertical;
+    box-sizing: border-box;
 }
