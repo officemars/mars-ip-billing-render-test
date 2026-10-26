@@ -207,4 +207,8 @@
 
     resize: vertical;
     box-sizing: border-box;
+}/* Recent Entries: hide Client column only */
+.wide table th:nth-child(2),
+.wide table td:nth-child(2) {
+    display: none !important;
 }
