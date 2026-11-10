@@ -207,4 +207,48 @@
 
     resize: vertical;
     box-sizing: border-box;
+}/* =========================================================
+   /entries page - compact Matter + Service description
+   Allow wrapping between words, never inside words.
+   ========================================================= */
+
+/* Matter column */
+body .wide td.matter-column,
+body .wide th.matter-column {
+    width: 170px !important;
+    min-width: 170px !important;
+    max-width: 170px !important;
+
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+}
+
+/* Service description */
+body .wide td.service-column,
+body .wide th.service-column {
+    width: 260px !important;
+    min-width: 260px !important;
+    max-width: 260px !important;
+
+    white-space: normal !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+}
+
+/* Service description editing box: use height instead of width */
+body .wide td.service-column textarea,
+body .wide textarea[name="services"] {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+
+    min-height: 130px !important;
+
+    white-space: pre-wrap !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+
+    resize: vertical;
+    box-sizing: border-box;
 }
