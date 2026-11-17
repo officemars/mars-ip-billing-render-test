@@ -280,48 +280,68 @@ def _vat(doc,d,lang):
         elif net and rate: amount=(net*rate/Decimal('100')).quantize(Decimal('0.01'))
     word={'en':'VAT','fr':'TVA','de':'MwSt.'}[lang]
     label=f'{word} ({_num(rate,lang,0)}%)'
+    amount_text=_money(amount,d,lang)
     currency=getattr(d,'currency',None) or 'EUR'
-    paragraphs=list(doc.paragraphs)+[p for t in doc.tables for row in t.rows for c in row.cells for p in c.paragraphs]
-    # The official templates use separate paragraphs rather than a reliable table
-    # row. Locate the exact percentage paragraph and rewrite its neighbouring
-    # label/alternative block in place.
-    percent_indexes=[i for i,p in enumerate(paragraphs) if re.fullmatch(r'\s*\d+(?:[.,]\d+)?\s*%\s*',p.text)]
-    target=None
-    for i in percent_indexes:
-        before=' '.join(p.text.lower() for p in paragraphs[max(0,i-3):i+1])
-        if any(x in before for x in ('vat','tva','mwst','umsatzsteuer')):
-            target=i;break
-    if target is not None:
-        # Find the tax label immediately before the first percentage.
-        label_i=None
-        for j in range(target-1,max(-1,target-5),-1):
-            if any(x in paragraphs[j].text.lower() for x in ('vat','tva','mwst','umsatzsteuer')):
-                label_i=j;break
-        if label_i is not None:
-            paragraphs[label_i].text=label
-            for r in paragraphs[label_i].runs:r.font.size=Pt(11);r.bold=True
-        paragraphs[target].text=_money(amount,d,lang)
-        for r in paragraphs[target].runs:r.font.size=Pt(11);r.bold=True
-        # Blank only the unused alternative and explanatory paragraphs between
-        # the selected tax row and the first gross-total amount/label.
-        for j in range(target+1,min(len(paragraphs),target+7)):
-            text=paragraphs[j].text.strip()
-            low=text.lower()
-            if re.search(r'\b\d[\d.,]*\s*'+re.escape(currency.lower())+r'\b',low) or any(x in low for x in ('montant total','total gross','gesamtbetrag')):
-                break
-            if ('[or]' in low or 'exonération' in low or 'exoneration' in low or
-                'reverse charge' in low or 'auto liquid' in low or
-                re.fullmatch(r'\s*0(?:[.,]0+)?\s*%\s*',text)):
-                paragraphs[j].text=''
-    # Remove a loose duplicate gross amount immediately before the labelled
-    # total. Keep the labelled MONTANT TOTAL / TOTAL GROSS / GESAMTBETRAG amount.
-    for i,p in enumerate(paragraphs):
-        low=p.text.strip().lower()
-        if any(x in low for x in ('montant total','total gross','gesamtbetrag')):
-            for j in range(max(0,i-3),i):
-                candidate=paragraphs[j].text.strip()
-                if re.fullmatch(r'[\d.,\s]+\s*'+re.escape(currency),candidate,re.I):
-                    paragraphs[j].text=''
+    vat_rows=[]
+    total_rows=[]
+    for table in doc.tables:
+        for row in list(table.rows):
+            left=' '.join(c.text for c in row.cells[:-1]).strip()
+            right=row.cells[-1].text.strip() if row.cells else ''
+            low=left.lower()
+            if any(x in low for x in ('montant total','total gross','gesamtbetrag')):
+                total_rows.append((table,row))
+            if (any(x in low for x in ('vat','tva','mwst','umsatzsteuer','exonération','exoneration','reverse charge','auto liquid'))
+                    and ('vat number' not in low and 'numéro de tva' not in low and 'n° de tva' not in low and 'ust-nr' not in low)):
+                vat_rows.append((table,row))
+    if vat_rows:
+        table,row=vat_rows[0]
+        # Collapse all template alternatives to one selected tax row.
+        _text(row.cells[0],label,True)
+        for middle in row.cells[1:-1]: _text(middle,'')
+        _text(row.cells[-1],amount_text,True)
+        for other_table,other_row in vat_rows[1:]:
+            if other_row is not row: other_table._tbl.remove(other_row._tr)
+    # Keep one labelled total row and one amount only.
+    if total_rows:
+        table,row=total_rows[0]
+        values=[]
+        for cell in row.cells:
+            values += re.findall(r'[\d][\d.,\s]*\s*'+re.escape(currency),cell.text,re.I)
+        chosen=values[-1].strip() if values else _money(gross or (net+amount),d,lang)
+        localized=_decimal_from_printed(re.sub(r'\s*'+re.escape(currency)+r'\s*$','',chosen,flags=re.I))
+        if localized is not None: chosen=f'{_num(localized,lang)} {currency}'
+        _text(row.cells[-1],chosen,True)
+        for other_table,other_row in total_rows[1:]:
+            if other_row is not row: other_table._tbl.remove(other_row._tr)
+
+def _font_11_from_page_two(doc):
+    """Set all body text from the page-2 boundary onward to exactly 11 pt."""
+    body=doc._element.body
+    started=False
+    for child in body.iterchildren():
+        # A preceding explicit page break starts page 2.
+        if child.xpath('.//w:br[@w:type="page"]') or child.xpath('.//w:lastRenderedPageBreak'):
+            started=True
+        text=''.join(child.itertext()).strip().lower()
+        # Fallback anchors used by the three invoice templates.
+        if any(x in text for x in ('détail [','detail [','details [','leistungsübersicht','tätigkeitsnachweis')):
+            started=True
+        if started:
+            for rpr in child.xpath('.//w:rPr'):
+                sz=rpr.find(qn('w:sz'))
+                if sz is None:
+                    sz=OxmlElement('w:sz');rpr.append(sz)
+                sz.set(qn('w:val'),'22')
+                szcs=rpr.find(qn('w:szCs'))
+                if szcs is None:
+                    szcs=OxmlElement('w:szCs');rpr.append(szcs)
+                szcs.set(qn('w:val'),'22')
+            # Runs without rPr also need an explicit size.
+            for run in child.xpath('.//w:r[not(w:rPr)]'):
+                rpr=OxmlElement('w:rPr');run.insert(0,rpr)
+                sz=OxmlElement('w:sz');sz.set(qn('w:val'),'22');rpr.append(sz)
+                szcs=OxmlElement('w:szCs');szcs.set(qn('w:val'),'22');rpr.append(szcs)
 
 def _details(doc,d):
     currency=getattr(d,'currency',None) or 'EUR'
@@ -351,6 +371,7 @@ def _correct(doc,d):
     _localized_amounts(doc,d,lang)
     _vat(doc,d,lang)
     _details(doc,d)
+    _font_11_from_page_two(doc)
 
 # Bypass change31's broad VAT matcher, which can overwrite the fees row.
 # Use the authoritative pre-localization generator, then apply the precise V34 corrections.
