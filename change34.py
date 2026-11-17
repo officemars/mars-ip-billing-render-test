@@ -365,13 +365,26 @@ def _details(doc,d):
         return
 
 def _correct(doc,d):
+    # A formatting failure must never cancel every preceding correction. The
+    # previous all-or-nothing block returned the untouched original DOCX when
+    # any one stage raised, which is why every defect remained unchanged.
     lang=_lang(d)
-    _engagement(doc,d,lang)
-    _payment_terms(doc,d,lang)
-    _localized_amounts(doc,d,lang)
-    _vat(doc,d,lang)
-    _details(doc,d)
-    _font_11_from_page_two(doc)
+    stages=(
+        ('engagement', lambda: _engagement(doc,d,lang)),
+        ('payment_terms', lambda: _payment_terms(doc,d,lang)),
+        ('localized_amounts', lambda: _localized_amounts(doc,d,lang)),
+        ('vat_and_total', lambda: _vat(doc,d,lang)),
+        ('detail_table', lambda: _details(doc,d)),
+        ('page_two_font', lambda: _font_11_from_page_two(doc)),
+    )
+    failures=[]
+    for stage,operation in stages:
+        try:
+            operation()
+        except Exception as exc:
+            failures.append('%s: %s' % (stage,exc))
+            app.logger.exception('V34 stage failed: %s',stage)
+    return failures
 
 # Bypass change31's broad VAT matcher, which can overwrite the fees row.
 # Use the authoritative pre-localization generator, then apply the precise V34 corrections.
@@ -382,9 +395,13 @@ if _old_issue:
         ctype=response.headers.get('Content-Type','') if hasattr(response,'headers') else ''
         if not d or getattr(response,'status_code',None)!=200 or 'officedocument.wordprocessingml.document' not in ctype:return response
         try:
-            doc=Document(io.BytesIO(response.get_data()));_correct(doc,d);out=io.BytesIO();doc.save(out)
+            doc=Document(io.BytesIO(response.get_data()))
+            failures=_correct(doc,d)
+            out=io.BytesIO();doc.save(out)
             headers=dict(response.headers);headers.pop('Content-Length',None)
+            if failures: headers['X-MARSIP-V34-Warnings']='; '.join(failures)[:1000]
             return Response(out.getvalue(),status=200,headers=headers,mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
         except Exception:
-            app.logger.exception('V34 document correction failed');return response
+            app.logger.exception('V34 could not open or save DOCX')
+            return response
     app.view_functions['issue_fee_note']=issue_fee_note_v34
