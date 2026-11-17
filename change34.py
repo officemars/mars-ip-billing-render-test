@@ -273,35 +273,55 @@ def _engagement(doc,d,lang):
 def _vat(doc,d,lang):
     rate=Decimal(str(getattr(d,'vat_rate',19) or 19))
     amount=Decimal(str(getattr(d,'vat_amount',0) or 0))
-    # If an older record omitted vat_amount but has net/gross totals, recover it.
+    gross=Decimal(str(getattr(d,'gross_total',0) or 0))
+    net=Decimal(str(getattr(d,'net_total',0) or 0))
     if amount == 0:
-        gross=Decimal(str(getattr(d,'gross_total',0) or 0))
-        net=Decimal(str(getattr(d,'net_total',0) or 0))
-        if gross > net:
-            amount=gross-net
-        elif net and rate:
-            amount=(net*rate/Decimal('100')).quantize(Decimal('0.01'))
+        if gross > net: amount=(gross-net).quantize(Decimal('0.01'))
+        elif net and rate: amount=(net*rate/Decimal('100')).quantize(Decimal('0.01'))
     word={'en':'VAT','fr':'TVA','de':'MwSt.'}[lang]
     label=f'{word} ({_num(rate,lang,0)}%)'
-    matches=[]
-    for table in doc.tables:
-        for row in table.rows:
-            if len(row.cells)<2:continue
-            left=re.sub(r'\s+',' ',row.cells[0].text).strip().lower()
-            right=re.sub(r'\s+',' ',row.cells[-1].text).strip().lower()
-            # Match the invoice tax row, including French templates containing
-            # VAT [Or] Exonération de TVA, but never the VAT-number header.
-            tax_words=any(x in left for x in ('vat','tva','mwst','umsatzsteuer','autoliquid','reverse charge'))
-            tax_values=bool(re.search(r'(^|\s)\d+(?:[.,]\d+)?\s*%',right))
-            excluded=any(x in left for x in ('vat number','n° de tva','numéro de tva','ust-nr'))
-            if tax_words and tax_values and not excluded: matches.append((table,row))
-    if not matches:return
-    table,row=matches[-1]
-    _text(row.cells[0],label,True)
-    _text(row.cells[-1],_money(amount,d,lang),True)
-    # Delete any additional tax rows created by a template/older patch.
-    for other_table,other_row in matches[:-1]:
-        if other_row is not row: other_table._tbl.remove(other_row._tr)
+    currency=getattr(d,'currency',None) or 'EUR'
+    paragraphs=list(doc.paragraphs)+[p for t in doc.tables for row in t.rows for c in row.cells for p in c.paragraphs]
+    # The official templates use separate paragraphs rather than a reliable table
+    # row. Locate the exact percentage paragraph and rewrite its neighbouring
+    # label/alternative block in place.
+    percent_indexes=[i for i,p in enumerate(paragraphs) if re.fullmatch(r'\s*\d+(?:[.,]\d+)?\s*%\s*',p.text)]
+    target=None
+    for i in percent_indexes:
+        before=' '.join(p.text.lower() for p in paragraphs[max(0,i-3):i+1])
+        if any(x in before for x in ('vat','tva','mwst','umsatzsteuer')):
+            target=i;break
+    if target is not None:
+        # Find the tax label immediately before the first percentage.
+        label_i=None
+        for j in range(target-1,max(-1,target-5),-1):
+            if any(x in paragraphs[j].text.lower() for x in ('vat','tva','mwst','umsatzsteuer')):
+                label_i=j;break
+        if label_i is not None:
+            paragraphs[label_i].text=label
+            for r in paragraphs[label_i].runs:r.font.size=Pt(11);r.bold=True
+        paragraphs[target].text=_money(amount,d,lang)
+        for r in paragraphs[target].runs:r.font.size=Pt(11);r.bold=True
+        # Blank only the unused alternative and explanatory paragraphs between
+        # the selected tax row and the first gross-total amount/label.
+        for j in range(target+1,min(len(paragraphs),target+7)):
+            text=paragraphs[j].text.strip()
+            low=text.lower()
+            if re.search(r'\b\d[\d.,]*\s*'+re.escape(currency.lower())+r'\b',low) or any(x in low for x in ('montant total','total gross','gesamtbetrag')):
+                break
+            if ('[or]' in low or 'exonération' in low or 'exoneration' in low or
+                'reverse charge' in low or 'auto liquid' in low or
+                re.fullmatch(r'\s*0(?:[.,]0+)?\s*%\s*',text)):
+                paragraphs[j].text=''
+    # Remove a loose duplicate gross amount immediately before the labelled
+    # total. Keep the labelled MONTANT TOTAL / TOTAL GROSS / GESAMTBETRAG amount.
+    for i,p in enumerate(paragraphs):
+        low=p.text.strip().lower()
+        if any(x in low for x in ('montant total','total gross','gesamtbetrag')):
+            for j in range(max(0,i-3),i):
+                candidate=paragraphs[j].text.strip()
+                if re.fullmatch(r'[\d.,\s]+\s*'+re.escape(currency),candidate,re.I):
+                    paragraphs[j].text=''
 
 def _details(doc,d):
     currency=getattr(d,'currency',None) or 'EUR'
