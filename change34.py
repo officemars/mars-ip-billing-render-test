@@ -131,8 +131,13 @@ def invoice_form_defaults_v34(response):
     # Add missing Date and Timekeeper controls to the full editor's Add line form.
     # update32 already saves service_date and employee_id; this exposes those inputs.
     if request.endpoint in ('edit_fee_note_original_v4','edit_fee_note','invoice_control_edit_v18') and 'name="employee_id"' not in html:
-        users=core.User.query.order_by(core.User.name).all()
-        options=''.join('<option value="%s">%s</option>' % (u.id, (u.name or u.email or ('User '+str(u.id)))) for u in users)
+        users=core.User.query.order_by(core.User.id).all()
+        def user_label(u):
+            for attr in ('display_name','full_name','username','email','initials'):
+                value=getattr(u,attr,None)
+                if value:return str(value)
+            return 'User '+str(u.id)
+        options=''.join('<option value="%s">%s</option>' % (u.id, user_label(u)) for u in users)
         controls='<label>Date<input type="date" name="service_date" required></label><label>Timekeeper<select name="employee_id" required><option value="">Select timekeeper</option>'+options+'</select></label>'
         html=html.replace('<label>Type<select name="line_type"', controls+'<label>Type<select name="line_type"',1)
     html=html.replace('<label>Employee<select name="employee_id"', '<label>Timekeeper<select name="employee_id"')
@@ -183,7 +188,7 @@ def _payment_term_key(value):
         return '30_eom'
     if re.search(r'\b30\b',x) or compact in ('30days','30jours','30tage'):
         return '30'
-    if re.search(r'\b8\b',x) or 'huitaine' in x or compact in ('8days','8jours','8tage'):
+    if re.search(r'\b8\b',x) or 'eight day' in x or 'huitaine' in x or compact in ('8days','eightdays','8jours','8tage'):
         return '8'
     return x
 
@@ -272,7 +277,10 @@ def _vat(doc,d,lang):
     if amount == 0:
         gross=Decimal(str(getattr(d,'gross_total',0) or 0))
         net=Decimal(str(getattr(d,'net_total',0) or 0))
-        if gross > net: amount=gross-net
+        if gross > net:
+            amount=gross-net
+        elif net and rate:
+            amount=(net*rate/Decimal('100')).quantize(Decimal('0.01'))
     word={'en':'VAT','fr':'TVA','de':'MwSt.'}[lang]
     label=f'{word} ({_num(rate,lang,0)}%)'
     matches=[]
