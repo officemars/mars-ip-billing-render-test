@@ -125,10 +125,16 @@ for _ep in ('edit_fee_note_original_v4','edit_fee_note','invoice_edit','fee_note
 def invoice_form_defaults_v34(response):
     if response.status_code!=200 or 'text/html' not in response.headers.get('Content-Type',''):
         return response
-    if request.endpoint not in ('invoice_new','edit_fee_note_original_v4','edit_fee_note','invoice_edit','fee_note_edit'):
+    if request.endpoint not in ('invoice_new','edit_fee_note_original_v4','edit_fee_note','invoice_edit','fee_note_edit','invoice_control_edit_v18'):
         return response
     html=response.get_data(as_text=True)
-    # The manual invoice-line form uses the central User record as timekeeper.
+    # Add missing Date and Timekeeper controls to the full editor's Add line form.
+    # update32 already saves service_date and employee_id; this exposes those inputs.
+    if request.endpoint in ('edit_fee_note_original_v4','edit_fee_note','invoice_control_edit_v18') and 'name="employee_id"' not in html:
+        users=core.User.query.order_by(core.User.name).all()
+        options=''.join('<option value="%s">%s</option>' % (u.id, (u.name or u.email or ('User '+str(u.id)))) for u in users)
+        controls='<label>Date<input type="date" name="service_date" required></label><label>Timekeeper<select name="employee_id" required><option value="">Select timekeeper</option>'+options+'</select></label>'
+        html=html.replace('<label>Type<select name="line_type"', controls+'<label>Type<select name="line_type"',1)
     html=html.replace('<label>Employee<select name="employee_id"', '<label>Timekeeper<select name="employee_id"')
     # Default ON only on the initial creation form. Editor pages respect the
     # persisted value, so an administrator can untick it and keep it unticked.
@@ -198,19 +204,20 @@ def _payment_sentence(d,lang):
 def _payment_terms(doc,d,lang):
     sentence=_payment_sentence(d,lang)
     if not sentence:return
-    markers=(
-        '[payment due date:', 'paiement sous [', 'paiement à [',
-        'payment due within [', 'zahlbar innerhalb [',
-    )
-    prefixes=('paiement sous','paiement à','payment due within','zahlbar innerhalb')
     paragraphs=list(doc.paragraphs)+[p for t in doc.tables for row in t.rows for c in row.cells for p in c.paragraphs]
     for p in paragraphs:
-        lower=p.text.strip().lower()
-        if any(m in lower for m in markers) or (lower.startswith(prefixes) and ('/' in lower or '[' in lower)):
+        normalized=re.sub(r'\s+',' ',p.text.replace('\u00a0',' ')).strip().lower()
+        is_placeholder=('payment due date' in normalized or
+                        ('paiement sous' in normalized and ('[' in normalized or '/' in normalized)) or
+                        ('paiement à' in normalized and ('[' in normalized or '/' in normalized)) or
+                        ('payment due within' in normalized and ('[' in normalized or '/' in normalized)) or
+                        ('zahlbar innerhalb' in normalized and ('[' in normalized or '/' in normalized)))
+        if is_placeholder:
+            # The selected term is the whole output. Template alternatives and
+            # surrounding placeholder instructions are deliberately discarded.
             p.text=sentence
             for r in p.runs:r.font.size=Pt(11);r.bold=True
             return
-
 
 def _decimal_from_printed(value):
     """Read either 2,000.34 or 2.000,34 without confusing thousands/decimals."""
@@ -259,33 +266,34 @@ def _engagement(doc,d,lang):
             return
 
 def _vat(doc,d,lang):
-    treatment=str(getattr(d,'vat_treatment','') or '').lower();reverse='reverse' in treatment or 'exempt' in treatment
-    rate=Decimal('0') if reverse else Decimal(str(getattr(d,'vat_rate',19) or 19))
-    amount=Decimal('0') if reverse else Decimal(str(getattr(d,'vat_amount',0) or 0))
-    word={'en':'VAT','fr':'TVA','de':'MwSt.'}[lang];label=f'{word} ({_num(rate,lang,0)}%)'
-    candidates=[]
+    rate=Decimal(str(getattr(d,'vat_rate',19) or 19))
+    amount=Decimal(str(getattr(d,'vat_amount',0) or 0))
+    # If an older record omitted vat_amount but has net/gross totals, recover it.
+    if amount == 0:
+        gross=Decimal(str(getattr(d,'gross_total',0) or 0))
+        net=Decimal(str(getattr(d,'net_total',0) or 0))
+        if gross > net: amount=gross-net
+    word={'en':'VAT','fr':'TVA','de':'MwSt.'}[lang]
+    label=f'{word} ({_num(rate,lang,0)}%)'
+    matches=[]
     for table in doc.tables:
-        for i,row in enumerate(table.rows):
+        for row in table.rows:
             if len(row.cells)<2:continue
-            left=row.cells[0].text.strip().lower();right=row.cells[-1].text.strip()
-            # Exact VAT-label row only. Excludes VAT-number prose and fees rows
-            # containing phrases such as "excluding VAT".
-            exact=bool(re.fullmatch(r'(vat|tva|mwst\.?|umsatzsteuer)(\s*\([^)]*\))?',left,re.I))
-            percent=bool(re.fullmatch(r'\s*\d+(?:[.,]\d+)?\s*%\s*',right))
-            if exact and (percent or left in ('vat','tva','mwst.','mwst','umsatzsteuer')):candidates.append((table,i,row))
-    if not candidates:return
-    table,index,row=candidates[-1]
-    _text(row.cells[0],label,True);_text(row.cells[-1],_money(amount,d,lang),True)
-    # Remove only adjacent duplicate VAT or TOTAL rows, never valid non-adjacent totals.
-    seen=set()
-    for r in list(table.rows):
-        key='|'.join(c.text.strip().lower() for c in r.cells)
-        category=('vat' if re.match(r'^(vat|tva|mwst\.?|umsatzsteuer)',r.cells[0].text.strip(),re.I)
-                  else 'total_gross' if any(x in r.cells[0].text.lower() for x in ('total gross','total ttc','gesamtbetrag','brutto'))
-                  else '')
-        if category and category in seen:
-            table._tbl.remove(r._tr)
-        elif category:seen.add(category)
+            left=re.sub(r'\s+',' ',row.cells[0].text).strip().lower()
+            right=re.sub(r'\s+',' ',row.cells[-1].text).strip().lower()
+            # Match the invoice tax row, including French templates containing
+            # VAT [Or] Exonération de TVA, but never the VAT-number header.
+            tax_words=any(x in left for x in ('vat','tva','mwst','umsatzsteuer','autoliquid','reverse charge'))
+            tax_values=bool(re.search(r'(^|\s)\d+(?:[.,]\d+)?\s*%',right))
+            excluded=any(x in left for x in ('vat number','n° de tva','numéro de tva','ust-nr'))
+            if tax_words and tax_values and not excluded: matches.append((table,row))
+    if not matches:return
+    table,row=matches[-1]
+    _text(row.cells[0],label,True)
+    _text(row.cells[-1],_money(amount,d,lang),True)
+    # Delete any additional tax rows created by a template/older patch.
+    for other_table,other_row in matches[:-1]:
+        if other_row is not row: other_table._tbl.remove(other_row._tr)
 
 def _details(doc,d):
     currency=getattr(d,'currency',None) or 'EUR'
