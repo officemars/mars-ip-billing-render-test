@@ -1135,13 +1135,13 @@ def master_defaults_v35(response):
     if 'marsip-v35-master' in html:
         return response
     payload = {str(c.id): {'rate': ('%.2f' % float(c.client_hourly_rate)) if c.client_hourly_rate is not None else '',
-                           'engagement': facts('client', c.id).get('engagement_letter_date', '')}
+                           'engagement': facts('client', c.id).get('engagement_letter_date', ''),'terms':c.payment_terms or facts('client',c.id).get('payment_terms','')}
                for c in core.Client.query.all()}
     import json as _json
     script = ('<script id="marsip-v35-master">(function(){const C=%s;'
               'const rec=document.getElementById("matter-record"),form=rec&&rec.closest("form");if(!form)return;'
-              'const cl=form.querySelector("[name=client_id]"),rate=form.querySelector("[name=hourly_rate]"),eng=form.querySelector("[name=engagement_letter_date]");'
-              'function fill(force){const c=C[cl.value]||{};if(rate&&(force||!rate.value))rate.value=c.rate||"";if(eng&&(force||!eng.value))eng.value=c.engagement||"";}'
+              'const cl=form.querySelector("[name=client_id]"),rate=form.querySelector("[name=hourly_rate]"),eng=form.querySelector("[name=engagement_letter_date]"),terms=form.querySelector("[name=payment_terms]");'
+              'function fill(force){const c=C[cl.value]||{};if(rate&&(force||!rate.value))rate.value=c.rate||"";if(eng&&(force||!eng.value))eng.value=c.engagement||"";if(terms&&(force||!terms.value))terms.value=c.terms||"";}'
               'cl.addEventListener("change",()=>fill(true));rec.addEventListener("change",()=>{if(!rec.value)setTimeout(()=>fill(true),0);});if(!rec.value)fill(false);})();</script>'
               % _json.dumps(payload))
     html = html.replace('</body>', script + '</body>', 1) if '</body>' in html else html + script
